@@ -155,7 +155,7 @@ class BanMenu(discord.ui.View):
 
 # =================== MODALS ===================
 class TimeoutModal(discord.ui.Modal, title="Timeout someone"):
-    user = discord.ui.TextInput(label="User ID oder Name", required=True)
+    user = discord.ui.TextInput(label="User ID oder @(Benutzername)", required=True)
     seconds = discord.ui.TextInput(label="Sekunden", default="0", required=False)
     minutes = discord.ui.TextInput(label="Minuten", default="0", required=False)
     hours = discord.ui.TextInput(label="Stunden", default="0", required=False)
@@ -169,7 +169,6 @@ class TimeoutModal(discord.ui.Modal, title="Timeout someone"):
             await interaction.response.send_message("❌ Nutzer nicht gefunden.", ephemeral=True)
             return
 
-        # Dauer berechnen
         total_seconds = int(self.seconds.value or 0) + int(self.minutes.value or 0)*60 + int(self.hours.value or 0)*3600
         if total_seconds <= 0:
             await interaction.response.send_message("⚠️ Ungültige Dauer.", ephemeral=True)
@@ -177,12 +176,11 @@ class TimeoutModal(discord.ui.Modal, title="Timeout someone"):
 
         user_entry = ensure_user_entry(guild.id, author.id)
         if not check_limit(user_entry, "timeout", author.id, guild.owner_id, self.global_id.value):
-            await interaction.response.send_message("❌ Limit erreicht. Globale ID erforderlich!", ephemeral=True)
+            await interaction.response.send_message("❌ Sie benötigen die ID vom Eigentümer des Servers um das Limit zu überschreiten", ephemeral=True)
             return
 
         try:
             await member.timeout(timedelta(seconds=total_seconds), reason=f"Timeout by {author}")
-            # nur hochzählen, wenn Limit nicht durch Bypass überschritten
             if user_entry["timeout"] < LIMITS["timeout"]:
                 user_entry["timeout"] += 1
             save_data()
@@ -191,7 +189,7 @@ class TimeoutModal(discord.ui.Modal, title="Timeout someone"):
             await interaction.response.send_message(f"❌ Fehler: {e}", ephemeral=True)
 
 class UntimeoutModal(discord.ui.Modal, title="Untimeout someone"):
-    user = discord.ui.TextInput(label="User ID oder Name", required=True)
+    user = discord.ui.TextInput(label="User ID oder @(Benutzername)", required=True)
     async def on_submit(self, interaction: discord.Interaction):
         member = find_member(interaction.guild, self.user.value)
         if not member:
@@ -204,7 +202,7 @@ class UntimeoutModal(discord.ui.Modal, title="Untimeout someone"):
             await interaction.response.send_message(f"❌ Fehler: {e}", ephemeral=True)
 
 class KickModal(discord.ui.Modal, title="Kick someone"):
-    user = discord.ui.TextInput(label="User ID oder Name", required=True)
+    user = discord.ui.TextInput(label="User ID oder @(Benutzername)", required=True)
     global_id = discord.ui.TextInput(label="Globale ID (optional)", required=False, max_length=50)
     async def on_submit(self, interaction: discord.Interaction):
         member = find_member(interaction.guild, self.user.value)
@@ -213,7 +211,7 @@ class KickModal(discord.ui.Modal, title="Kick someone"):
             return
         user_entry = ensure_user_entry(interaction.guild.id, interaction.user.id)
         if not check_limit(user_entry, "kick", interaction.user.id, interaction.guild.owner_id, self.global_id.value):
-            await interaction.response.send_message("❌ Limit erreicht. Globale ID erforderlich!", ephemeral=True)
+            await interaction.response.send_message("❌ Sie benötigen die ID vom Eigentümer des Servers um das Limit zu überschreiten", ephemeral=True)
             return
         try:
             await member.kick(reason=f"Kicked by {interaction.user}")
@@ -225,7 +223,7 @@ class KickModal(discord.ui.Modal, title="Kick someone"):
             await interaction.response.send_message(f"❌ Fehler: {e}", ephemeral=True)
 
 class BanModal(discord.ui.Modal, title="Ban someone"):
-    user = discord.ui.TextInput(label="User ID oder Name", required=True)
+    user = discord.ui.TextInput(label="User ID oder @(Benutzername)", required=True)
     global_id = discord.ui.TextInput(label="Globale ID (optional)", required=False, max_length=50)
     async def on_submit(self, interaction: discord.Interaction):
         member = find_member(interaction.guild, self.user.value)
@@ -234,7 +232,7 @@ class BanModal(discord.ui.Modal, title="Ban someone"):
             return
         user_entry = ensure_user_entry(interaction.guild.id, interaction.user.id)
         if not check_limit(user_entry, "ban", interaction.user.id, interaction.guild.owner_id, self.global_id.value):
-            await interaction.response.send_message("❌ Limit erreicht. Globale ID erforderlich!", ephemeral=True)
+            await interaction.response.send_message("❌ Sie benötigen die ID vom Eigentümer des Servers um das Limit zu überschreiten", ephemeral=True)
             return
         try:
             await member.ban(reason=f"Banned by {interaction.user}")
@@ -282,7 +280,6 @@ async def daily_reset():
 # =================== READY ===================
 @bot.event
 async def on_ready():
-    # persistent views
     bot.add_view(DirectMenu())
     bot.add_view(TimeoutMenu())
     bot.add_view(KickMenu())
