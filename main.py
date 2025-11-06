@@ -98,19 +98,35 @@ def ensure_user_entry(guild_id: int, user_id: int):
     return g["actions"][uid]
 
 def check_limit(user_entry: dict, action: str, user_id: int, guild_owner_id: int, provided_id: str = None):
-    """Prüft Limit + globale ID Bypass"""
+    """Prüft Limit + globale ID Bypass (ID kann jetzt bis zu 3-mal pro Tag genutzt werden)."""
     # Limit überschritten
     if user_entry[action] >= LIMITS[action]:
         # Überprüfe globale ID
         if provided_id:
             g_id_entry = data["global_ids"].get(str(guild_owner_id))
-            if g_id_entry and g_id_entry["id"] == provided_id and str(user_id) not in g_id_entry.get("used_by", []):
-                # Bypass einmalig erlaubt
-                g_id_entry.setdefault("used_by", []).append(str(user_id))
-                save_data()
-                return True  # Limit gebypasst
+            if g_id_entry and g_id_entry.get("id") == provided_id:
+                used = g_id_entry.get("used_by", [])
+                # erlaubt, wenn die ID noch nicht von diesem Nutzer benutzt wurde und insgesamt noch < 3 Nutzungen
+                if str(user_id) not in used and len(used) < 3:
+                    g_id_entry.setdefault("used_by", []).append(str(user_id))
+                    save_data()
+                    return True  # Limit gebypasst
         return False  # Limit überschritten
     return True  # unter Limit
+
+def hierarchy_check(interaction: discord.Interaction, target: discord.Member) -> bool:
+    """Prüft, ob der Aufrufer (interaction.user) in der Rolle höher ist als das Ziel."""
+    author = interaction.user
+    # Server-Eigentümer darf immer
+    if author.id == interaction.guild.owner_id:
+        return True
+    # Man darf den Eigentümer niemals bestrafen
+    if target.id == interaction.guild.owner_id:
+        return False
+    # Top-Role Vergleich (gleich oder höher -> verboten)
+    if target.top_role >= author.top_role:
+        return False
+    return True
 
 # =================== VIEWS ===================
 class DirectMenu(discord.ui.View):
@@ -164,9 +180,18 @@ class TimeoutModal(discord.ui.Modal, title="Timeout someone"):
     async def on_submit(self, interaction: discord.Interaction):
         guild = interaction.guild
         author = interaction.user
+
+        if not author.guild_permissions.moderate_members:
+            await interaction.response.send_message("❌ Du hast keine Berechtigung zum Timeouten.", ephemeral=True)
+            return
+
         member = find_member(guild, self.user.value)
         if not member:
             await interaction.response.send_message("❌ Nutzer nicht gefunden.", ephemeral=True)
+            return
+
+        if not hierarchy_check(interaction, member):
+            await interaction.response.send_message("❌ Du kannst diesen Nutzer aufgrund der Hierarchie nicht timeouten.", ephemeral=True)
             return
 
         total_seconds = int(self.seconds.value or 0) + int(self.minutes.value or 0)*60 + int(self.hours.value or 0)*3600
@@ -176,7 +201,7 @@ class TimeoutModal(discord.ui.Modal, title="Timeout someone"):
 
         user_entry = ensure_user_entry(guild.id, author.id)
         if not check_limit(user_entry, "timeout", author.id, guild.owner_id, self.global_id.value):
-            await interaction.response.send_message("❌ Sie benötigen die ID vom Eigentümer des Servers um das Limit zu überschreiten", ephemeral=True)
+            await interaction.response.send_message("❌ Limit überschritten – Eigentümer-ID erforderlich.", ephemeral=True)
             return
 
         try:
@@ -191,10 +216,20 @@ class TimeoutModal(discord.ui.Modal, title="Timeout someone"):
 class UntimeoutModal(discord.ui.Modal, title="Untimeout someone"):
     user = discord.ui.TextInput(label="User ID oder @(Benutzername)", required=True)
     async def on_submit(self, interaction: discord.Interaction):
+        author = interaction.user
+        if not author.guild_permissions.moderate_members:
+            await interaction.response.send_message("❌ Du hast keine Berechtigung zum Ent-Timeouten.", ephemeral=True)
+            return
+
         member = find_member(interaction.guild, self.user.value)
         if not member:
             await interaction.response.send_message("❌ Nutzer nicht gefunden.", ephemeral=True)
             return
+
+        if not hierarchy_check(interaction, member):
+            await interaction.response.send_message("❌ Du kannst diesen Nutzer aufgrund der Hierarchie nicht ent-timeouten.", ephemeral=True)
+            return
+
         try:
             await member.timeout(None)
             await interaction.response.send_message(f"✅ {member.mention} ent-timeoutet.", ephemeral=True)
@@ -205,14 +240,25 @@ class KickModal(discord.ui.Modal, title="Kick someone"):
     user = discord.ui.TextInput(label="User ID oder @(Benutzername)", required=True)
     global_id = discord.ui.TextInput(label="Globale ID (optional)", required=False, max_length=50)
     async def on_submit(self, interaction: discord.Interaction):
+        author = interaction.user
+        if not author.guild_permissions.kick_members:
+            await interaction.response.send_message("❌ Du hast keine Berechtigung zum Kicken.", ephemeral=True)
+            return
+
         member = find_member(interaction.guild, self.user.value)
         if not member:
             await interaction.response.send_message("❌ Nutzer nicht gefunden.", ephemeral=True)
             return
+
+        if not hierarchy_check(interaction, member):
+            await interaction.response.send_message("❌ Du kannst diesen Nutzer aufgrund der Hierarchie nicht kicken.", ephemeral=True)
+            return
+
         user_entry = ensure_user_entry(interaction.guild.id, interaction.user.id)
         if not check_limit(user_entry, "kick", interaction.user.id, interaction.guild.owner_id, self.global_id.value):
-            await interaction.response.send_message("❌ Sie benötigen die ID vom Eigentümer des Servers um das Limit zu überschreiten", ephemeral=True)
+            await interaction.response.send_message("❌ Limit überschritten – Eigentümer-ID erforderlich.", ephemeral=True)
             return
+
         try:
             await member.kick(reason=f"Kicked by {interaction.user}")
             if user_entry["kick"] < LIMITS["kick"]:
@@ -226,14 +272,25 @@ class BanModal(discord.ui.Modal, title="Ban someone"):
     user = discord.ui.TextInput(label="User ID oder @(Benutzername)", required=True)
     global_id = discord.ui.TextInput(label="Globale ID (optional)", required=False, max_length=50)
     async def on_submit(self, interaction: discord.Interaction):
+        author = interaction.user
+        if not author.guild_permissions.ban_members:
+            await interaction.response.send_message("❌ Du hast keine Berechtigung zum Bannen.", ephemeral=True)
+            return
+
         member = find_member(interaction.guild, self.user.value)
         if not member:
             await interaction.response.send_message("❌ Nutzer nicht gefunden.", ephemeral=True)
             return
+
+        if not hierarchy_check(interaction, member):
+            await interaction.response.send_message("❌ Du kannst diesen Nutzer aufgrund der Hierarchie nicht bannen.", ephemeral=True)
+            return
+
         user_entry = ensure_user_entry(interaction.guild.id, interaction.user.id)
         if not check_limit(user_entry, "ban", interaction.user.id, interaction.guild.owner_id, self.global_id.value):
-            await interaction.response.send_message("❌ Sie benötigen die ID vom Eigentümer des Servers um das Limit zu überschreiten", ephemeral=True)
+            await interaction.response.send_message("❌ Limit überschritten – Eigentümer-ID erforderlich.", ephemeral=True)
             return
+
         try:
             await member.ban(reason=f"Banned by {interaction.user}")
             if user_entry["ban"] < LIMITS["ban"]:
@@ -255,10 +312,14 @@ async def show_my_id(interaction: discord.Interaction):
         return
     owner_id = str(interaction.user.id)
     today = today_str()
-    if owner_id not in data["global_ids"] or data["global_ids"][owner_id]["last_reset"] != today:
+    # Erstelle/aktualisiere die Owner-ID, wenn noch nicht vorhanden oder bereits älter (wird zusätzlich täglich durch daily_reset ersetzt)
+    if owner_id not in data["global_ids"] or data["global_ids"][owner_id].get("last_reset") != today:
         data["global_ids"][owner_id] = {"id": generate_id(), "last_reset": today, "used_by": []}
         save_data()
-    await interaction.response.send_message(f"🔑 Deine globale ID: `{data['global_ids'][owner_id]['id']}`", ephemeral=True)
+    await interaction.response.send_message(
+        f"🔑 Deine globale ID: `{data['global_ids'][owner_id]['id']}`\n\n⚠️Sie kriegen jeden Tag eine neue ID zur Sicherheit⚠️",
+        ephemeral=True
+    )
 
 # =================== DAILY RESET ===================
 @tasks.loop(minutes=1)
@@ -269,7 +330,7 @@ async def daily_reset():
         for guild_id, gdata in data.get("guilds", {}).items():
             gdata["actions"] = {}
             gdata["last_reset"] = today_str()
-        # reset global IDs
+        # reset global IDs (neue ID + used_by leeren)
         for owner_id, entry in data.get("global_ids", {}).items():
             entry["id"] = generate_id()
             entry["last_reset"] = today_str()
