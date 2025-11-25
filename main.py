@@ -1,352 +1,422 @@
-# main.py
-import os
-import json
-import random
-import string
-from datetime import datetime, timedelta
-import pytz
-
 import discord
+from discord.ext import commands
 from discord import app_commands
-from discord.ext import commands, tasks
+import asyncio
+import os
+from discord import AllowedMentions
 
-# =================== CONFIG ===================
-GER_TZ = pytz.timezone("Europe/Berlin")
-TOKEN = os.getenv("DISCORD_TOKEN")  # Railway env var
-
-DATA_FILE = "data.json"
-
-# Limits pro User / Tag
-LIMITS = {
-    "timeout": 10,
-    "kick": 3,
-    "ban": 2
-}
-
-# ---------------- INTENTS ----------------
+# ================= BOT SETUP =================
 intents = discord.Intents.default()
-intents.members = True
 intents.guilds = True
+intents.members = True
+intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
-try:
-    bot.remove_command("help")
-except Exception:
-    pass
+bot = commands.Bot(command_prefix="$", intents=intents)
 
-# =================== PERSISTENT DATEN ===================
-def load_data():
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"guilds": {}, "global_ids": {}}
+# ================= STORAGE PANEL 1 =================
+ticket_category_id = None
+ticket_mod_role_id = None
+ticket_count = 0
 
-def save_data():
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+# ================= STORAGE PANEL 2 =================
+ticket_category_id_2 = None
+ticket_mod_role_id_2 = None
+ticket_count_2 = 0
+embed_title_2 = "📨 Support Ticket"
+embed_text_2 = "Bitte erstelle ein Ticket, um deine Angelegenheiten mit dem Support zu besprechen."
 
-data = load_data()
+# ================= STORAGE PANEL 3 =================
+ticket_category_id_3 = None
+ticket_mod_role_id_3 = None
+ticket_count_3 = 0
+embed_title_3 = "📨 Support Ticket (Panel 3)"
+embed_text_3 = "Bitte erstelle ein Ticket, um deine Angelegenheiten mit dem Support zu besprechen."
 
-def today_str():
-    return datetime.now(GER_TZ).date().isoformat()
+# ================= ADMIN CHECK =================
+def is_admin(interaction: discord.Interaction) -> bool:
+    """Prüft, ob der Benutzer Administratorrechte hat."""
+    return interaction.user.guild_permissions.administrator
 
-def generate_id(length=14):
-    chars = string.ascii_letters + string.digits + "!§$%&/?#@_-+"
-    return ''.join(random.choice(chars) for _ in range(length))
+# ================= EMBED FARBE =================
+SUNFLOWER_YELLOW = discord.Color.from_rgb(255, 223, 0)  # Sunflower Yellow
 
-# =================== UTILITIES ===================
-def find_member(guild: discord.Guild, input_str: str):
-    if not input_str or not guild:
-        return None
-    s = input_str.strip()
-    if s.startswith("<@") and s.endswith(">"):
-        s = s.replace("<@", "").replace(">", "").replace("!", "")
-    s = s.lstrip("@").strip()
-    # ID
-    if s.isdigit():
-        try:
-            return guild.get_member(int(s)) or guild.fetch_member(int(s))
-        except:
-            return None
-    s_low = s.lower()
-    # username#discriminator
-    if "#" in s:
-        name, disc = s.rsplit("#", 1)
-        for m in guild.members:
-            if m.name.lower() == name.lower() and m.discriminator == disc:
-                return m
-    # partial match display_name or name
-    for m in guild.members:
-        if s_low in (m.display_name or "").lower() or s_low in (m.name or "").lower():
-            return m
-    return None
-
-def ensure_guild_entry(guild_id: int):
-    gid = str(guild_id)
-    if gid not in data["guilds"]:
-        data["guilds"][gid] = {"actions": {}, "last_reset": today_str()}
-        save_data()
-    return data["guilds"][gid]
-
-def ensure_user_entry(guild_id: int, user_id: int):
-    g = ensure_guild_entry(guild_id)
-    uid = str(user_id)
-    if uid not in g["actions"]:
-        g["actions"][uid] = {"timeout": 0, "kick": 0, "ban": 0, "used_global_id": False}
-        save_data()
-    return g["actions"][uid]
-
-def check_limit(user_entry: dict, action: str, user_id: int, guild_owner_id: int, provided_id: str = None):
-    """Prüft Limit + globale ID Bypass (ID kann jetzt bis zu 3-mal pro Tag genutzt werden)."""
-    # Limit überschritten
-    if user_entry[action] >= LIMITS[action]:
-        # Überprüfe globale ID
-        if provided_id:
-            g_id_entry = data["global_ids"].get(str(guild_owner_id))
-            if g_id_entry and g_id_entry.get("id") == provided_id:
-                used = g_id_entry.get("used_by", [])
-                # erlaubt, wenn die ID noch nicht von diesem Nutzer benutzt wurde und insgesamt noch < 3 Nutzungen
-                if str(user_id) not in used and len(used) < 3:
-                    g_id_entry.setdefault("used_by", []).append(str(user_id))
-                    save_data()
-                    return True  # Limit gebypasst
-        return False  # Limit überschritten
-    return True  # unter Limit
-
-def hierarchy_check(interaction: discord.Interaction, target: discord.Member) -> bool:
-    """Prüft, ob der Aufrufer (interaction.user) in der Rolle höher ist als das Ziel."""
-    author = interaction.user
-    # Server-Eigentümer darf immer
-    if author.id == interaction.guild.owner_id:
-        return True
-    # Man darf den Eigentümer niemals bestrafen
-    if target.id == interaction.guild.owner_id:
-        return False
-    # Top-Role Vergleich (gleich oder höher -> verboten)
-    if target.top_role >= author.top_role:
-        return False
-    return True
-
-# =================== VIEWS ===================
-class DirectMenu(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="TIMEOUT", style=discord.ButtonStyle.primary, custom_id="persistent_timeout_btn")
-    async def timeout_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Timeout Optionen:", view=TimeoutMenu(), ephemeral=True)
-
-    @discord.ui.button(label="KICK", style=discord.ButtonStyle.secondary, custom_id="persistent_kick_btn")
-    async def kick_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Kick Optionen:", view=KickMenu(), ephemeral=True)
-
-    @discord.ui.button(label="BAN", style=discord.ButtonStyle.danger, custom_id="persistent_ban_btn")
-    async def ban_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Ban Optionen:", view=BanMenu(), ephemeral=True)
-
-class TimeoutMenu(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    @discord.ui.button(label="Timeout someone", style=discord.ButtonStyle.danger, custom_id="persistent_timeout_someone")
-    async def timeout_someone(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(TimeoutModal())
-    @discord.ui.button(label="Untimeout someone", style=discord.ButtonStyle.success, custom_id="persistent_untimeout_someone")
-    async def untimeout_someone(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(UntimeoutModal())
-
-class KickMenu(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    @discord.ui.button(label="Kick someone", style=discord.ButtonStyle.danger, custom_id="persistent_kick_someone")
-    async def kick_someone(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(KickModal())
-
-class BanMenu(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    @discord.ui.button(label="Ban someone", style=discord.ButtonStyle.danger, custom_id="persistent_ban_someone")
-    async def ban_someone(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BanModal())
-
-# =================== MODALS ===================
-class TimeoutModal(discord.ui.Modal, title="Timeout someone"):
-    user = discord.ui.TextInput(label="User ID oder @(Benutzername)", required=True)
-    seconds = discord.ui.TextInput(label="Sekunden", default="0", required=False)
-    minutes = discord.ui.TextInput(label="Minuten", default="0", required=False)
-    hours = discord.ui.TextInput(label="Stunden", default="0", required=False)
-    global_id = discord.ui.TextInput(label="Globale ID (optional)", required=False, max_length=50)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        author = interaction.user
-
-        if not author.guild_permissions.moderate_members:
-            await interaction.response.send_message("❌ Du hast keine Berechtigung zum Timeouten.", ephemeral=True)
-            return
-
-        member = find_member(guild, self.user.value)
-        if not member:
-            await interaction.response.send_message("❌ Nutzer nicht gefunden.", ephemeral=True)
-            return
-
-        if not hierarchy_check(interaction, member):
-            await interaction.response.send_message("❌ Du kannst diesen Nutzer aufgrund der Hierarchie nicht timeouten.", ephemeral=True)
-            return
-
-        total_seconds = int(self.seconds.value or 0) + int(self.minutes.value or 0)*60 + int(self.hours.value or 0)*3600
-        if total_seconds <= 0:
-            await interaction.response.send_message("⚠️ Ungültige Dauer.", ephemeral=True)
-            return
-
-        user_entry = ensure_user_entry(guild.id, author.id)
-        if not check_limit(user_entry, "timeout", author.id, guild.owner_id, self.global_id.value):
-            await interaction.response.send_message("❌ Limit überschritten – Eigentümer-ID erforderlich.", ephemeral=True)
-            return
-
-        try:
-            await member.timeout(timedelta(seconds=total_seconds), reason=f"Timeout by {author}")
-            if user_entry["timeout"] < LIMITS["timeout"]:
-                user_entry["timeout"] += 1
-            save_data()
-            await interaction.response.send_message(f"✅ {member.mention} getimeoutet ({total_seconds} Sekunden).", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Fehler: {e}", ephemeral=True)
-
-class UntimeoutModal(discord.ui.Modal, title="Untimeout someone"):
-    user = discord.ui.TextInput(label="User ID oder @(Benutzername)", required=True)
-    async def on_submit(self, interaction: discord.Interaction):
-        author = interaction.user
-        if not author.guild_permissions.moderate_members:
-            await interaction.response.send_message("❌ Du hast keine Berechtigung zum Ent-Timeouten.", ephemeral=True)
-            return
-
-        member = find_member(interaction.guild, self.user.value)
-        if not member:
-            await interaction.response.send_message("❌ Nutzer nicht gefunden.", ephemeral=True)
-            return
-
-        if not hierarchy_check(interaction, member):
-            await interaction.response.send_message("❌ Du kannst diesen Nutzer aufgrund der Hierarchie nicht ent-timeouten.", ephemeral=True)
-            return
-
-        try:
-            await member.timeout(None)
-            await interaction.response.send_message(f"✅ {member.mention} ent-timeoutet.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Fehler: {e}", ephemeral=True)
-
-class KickModal(discord.ui.Modal, title="Kick someone"):
-    user = discord.ui.TextInput(label="User ID oder @(Benutzername)", required=True)
-    global_id = discord.ui.TextInput(label="Globale ID (optional)", required=False, max_length=50)
-    async def on_submit(self, interaction: discord.Interaction):
-        author = interaction.user
-        if not author.guild_permissions.kick_members:
-            await interaction.response.send_message("❌ Du hast keine Berechtigung zum Kicken.", ephemeral=True)
-            return
-
-        member = find_member(interaction.guild, self.user.value)
-        if not member:
-            await interaction.response.send_message("❌ Nutzer nicht gefunden.", ephemeral=True)
-            return
-
-        if not hierarchy_check(interaction, member):
-            await interaction.response.send_message("❌ Du kannst diesen Nutzer aufgrund der Hierarchie nicht kicken.", ephemeral=True)
-            return
-
-        user_entry = ensure_user_entry(interaction.guild.id, interaction.user.id)
-        if not check_limit(user_entry, "kick", interaction.user.id, interaction.guild.owner_id, self.global_id.value):
-            await interaction.response.send_message("❌ Limit überschritten – Eigentümer-ID erforderlich.", ephemeral=True)
-            return
-
-        try:
-            await member.kick(reason=f"Kicked by {interaction.user}")
-            if user_entry["kick"] < LIMITS["kick"]:
-                user_entry["kick"] += 1
-            save_data()
-            await interaction.response.send_message(f"✅ {member.mention} gekickt.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Fehler: {e}", ephemeral=True)
-
-class BanModal(discord.ui.Modal, title="Ban someone"):
-    user = discord.ui.TextInput(label="User ID oder @(Benutzername)", required=True)
-    global_id = discord.ui.TextInput(label="Globale ID (optional)", required=False, max_length=50)
-    async def on_submit(self, interaction: discord.Interaction):
-        author = interaction.user
-        if not author.guild_permissions.ban_members:
-            await interaction.response.send_message("❌ Du hast keine Berechtigung zum Bannen.", ephemeral=True)
-            return
-
-        member = find_member(interaction.guild, self.user.value)
-        if not member:
-            await interaction.response.send_message("❌ Nutzer nicht gefunden.", ephemeral=True)
-            return
-
-        if not hierarchy_check(interaction, member):
-            await interaction.response.send_message("❌ Du kannst diesen Nutzer aufgrund der Hierarchie nicht bannen.", ephemeral=True)
-            return
-
-        user_entry = ensure_user_entry(interaction.guild.id, interaction.user.id)
-        if not check_limit(user_entry, "ban", interaction.user.id, interaction.guild.owner_id, self.global_id.value):
-            await interaction.response.send_message("❌ Limit überschritten – Eigentümer-ID erforderlich.", ephemeral=True)
-            return
-
-        try:
-            await member.ban(reason=f"Banned by {interaction.user}")
-            if user_entry["ban"] < LIMITS["ban"]:
-                user_entry["ban"] += 1
-            save_data()
-            await interaction.response.send_message(f"✅ {member.mention} gebannt.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Fehler: {e}", ephemeral=True)
-
-# =================== SLASH COMMANDS ===================
-@bot.tree.command(name="direct", description="Öffne das Moderationsmenü")
-async def direct(interaction: discord.Interaction):
-    await interaction.response.send_message("🛠️ Moderationsmenü:", view=DirectMenu(), ephemeral=True)
-
-@bot.tree.command(name="show-my-id", description="Zeigt globale Owner-ID (nur Eigentümer)")
-async def show_my_id(interaction: discord.Interaction):
-    if interaction.user.id != interaction.guild.owner_id:
-        await interaction.response.send_message("❌ Nur Eigentümer darf das sehen.", ephemeral=True)
-        return
-    owner_id = str(interaction.user.id)
-    today = today_str()
-    # Erstelle/aktualisiere die Owner-ID, wenn noch nicht vorhanden oder bereits älter (wird zusätzlich täglich durch daily_reset ersetzt)
-    if owner_id not in data["global_ids"] or data["global_ids"][owner_id].get("last_reset") != today:
-        data["global_ids"][owner_id] = {"id": generate_id(), "last_reset": today, "used_by": []}
-        save_data()
-    await interaction.response.send_message(
-        f"🔑 Deine globale ID: `{data['global_ids'][owner_id]['id']}`\n\n⚠️Sie kriegen jeden Tag eine neue ID zur Sicherheit⚠️",
-        ephemeral=True
-    )
-
-# =================== DAILY RESET ===================
-@tasks.loop(minutes=1)
-async def daily_reset():
-    now = datetime.now(GER_TZ)
-    if now.hour == 0 and now.minute == 0:
-        # reset limits per guild
-        for guild_id, gdata in data.get("guilds", {}).items():
-            gdata["actions"] = {}
-            gdata["last_reset"] = today_str()
-        # reset global IDs (neue ID + used_by leeren)
-        for owner_id, entry in data.get("global_ids", {}).items():
-            entry["id"] = generate_id()
-            entry["last_reset"] = today_str()
-            entry["used_by"] = []
-        save_data()
-        print("[🔁] Tagesreset durchgeführt")
-
-# =================== READY ===================
+# ================= COMMANDS =================
 @bot.event
 async def on_ready():
-    bot.add_view(DirectMenu())
-    bot.add_view(TimeoutMenu())
-    bot.add_view(KickMenu())
-    bot.add_view(BanMenu())
-    daily_reset.start()
-    await bot.tree.sync()
-    print(f"✅ Bot eingeloggt als {bot.user}")
+    print(f"✅ Bot online als {bot.user}")
 
-bot.run(TOKEN)
+    # Persistent Views registrieren
+    bot.add_view(TicketOpenPersistentView())      
+    bot.add_view(TicketClosePersistentView())     
+    bot.add_view(TicketOpenPersistentView2())     
+    bot.add_view(TicketClosePersistentView2())    
+    bot.add_view(TicketOpenPersistentView3())     
+    bot.add_view(TicketClosePersistentView3())    
+
+    await bot.tree.sync()
+    print(f"Slash Commands synchronisiert")
+
+# ================= PANEL 1 =================
+@bot.tree.command(name="create-ticket-in", description="Setze die Kategorie für Tickets")
+@app_commands.check(is_admin)
+async def create_ticket_in(interaction: discord.Interaction, category_id: str):
+    global ticket_category_id
+    ticket_category_id = int(category_id)
+    await interaction.response.send_message(f"✅ Ticket Kategorie gesetzt: <#{ticket_category_id}>", ephemeral=True)
+
+@bot.tree.command(name="set-ticket-mod", description="Setze die Ticket-Mod Rolle")
+@app_commands.check(is_admin)
+async def set_ticket_mod(interaction: discord.Interaction, role_id: str):
+    global ticket_mod_role_id
+    ticket_mod_role_id = int(role_id)
+    await interaction.response.send_message(f"✅ Ticket Mod Rolle gesetzt: <@&{ticket_mod_role_id}>", ephemeral=True)
+
+@bot.tree.command(name="ticket-starten", description="Erstellt den Ticket Button")
+@app_commands.check(is_admin)
+async def ticket_starten(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📨 Support Ticket",
+        description="Bitte erstelle ein Ticket, um deine Angelegenheiten mit dem Support zu besprechen.",
+        color=SUNFLOWER_YELLOW
+    )
+    view = TicketOpenPersistentView()
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("✅ Ticket-Nachricht wurde gesendet.", ephemeral=True)
+
+# ================= PANEL 2 =================
+@bot.tree.command(name="create-ticket-in-2", description="Setze die Kategorie für Tickets (Panel 2)")
+@app_commands.check(is_admin)
+async def create_ticket_in_2(interaction: discord.Interaction, category_id: str):
+    global ticket_category_id_2
+    ticket_category_id_2 = int(category_id)
+    await interaction.response.send_message(f"✅ Ticket Kategorie (Panel 2) gesetzt: <#{ticket_category_id_2}>", ephemeral=True)
+
+@bot.tree.command(name="set-ticket-mod-2", description="Setze die Ticket-Mod Rolle (Panel 2)")
+@app_commands.check(is_admin)
+async def set_ticket_mod_2(interaction: discord.Interaction, role_id: str):
+    global ticket_mod_role_id_2
+    ticket_mod_role_id_2 = int(role_id)
+    await interaction.response.send_message(f"✅ Ticket Mod Rolle (Panel 2) gesetzt: <@&{ticket_mod_role_id_2}>", ephemeral=True)
+
+@bot.tree.command(name="set-embed-überschrift-2", description="Setze die Embed Überschrift für Panel 2")
+@app_commands.check(is_admin)
+async def set_embed_überschrift_2(interaction: discord.Interaction, title: str):
+    global embed_title_2
+    embed_title_2 = title
+    await interaction.response.send_message(f"✅ Embed Überschrift (Panel 2) gesetzt: **{embed_title_2}**", ephemeral=True)
+
+@bot.tree.command(name="set-embed-text-2", description="Setze den Embed Text für Panel 2")
+@app_commands.check(is_admin)
+async def set_embed_text_2(interaction: discord.Interaction, text: str):
+    global embed_text_2
+    embed_text_2 = text
+    await interaction.response.send_message(f"✅ Embed Text (Panel 2) gesetzt.", ephemeral=True)
+
+@bot.tree.command(name="ticket-starten-2", description="Erstellt den Ticket Button für Panel 2")
+@app_commands.check(is_admin)
+async def ticket_starten_2(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title=embed_title_2,
+        description=embed_text_2,
+        color=SUNFLOWER_YELLOW
+    )
+    view = TicketOpenPersistentView2()
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("✅ Ticket-Nachricht (Panel 2) wurde gesendet.", ephemeral=True)
+
+# ================= PANEL 3 =================
+@bot.tree.command(name="create-ticket-in-3", description="Setze die Kategorie für Tickets (Panel 3)")
+@app_commands.check(is_admin)
+async def create_ticket_in_3(interaction: discord.Interaction, category_id: str):
+    global ticket_category_id_3
+    ticket_category_id_3 = int(category_id)
+    await interaction.response.send_message(f"✅ Ticket Kategorie (Panel 3) gesetzt: <#{ticket_category_id_3}>", ephemeral=True)
+
+@bot.tree.command(name="set-ticket-mod-3", description="Setze die Ticket-Mod Rolle (Panel 3)")
+@app_commands.check(is_admin)
+async def set_ticket_mod_3(interaction: discord.Interaction, role_id: str):
+    global ticket_mod_role_id_3
+    ticket_mod_role_id_3 = int(role_id)
+    await interaction.response.send_message(f"✅ Ticket Mod Rolle (Panel 3) gesetzt: <@&{ticket_mod_role_id_3}>", ephemeral=True)
+
+@bot.tree.command(name="set-embed-überschrift-3", description="Setze die Embed Überschrift für Panel 3")
+@app_commands.check(is_admin)
+async def set_embed_überschrift_3(interaction: discord.Interaction, title: str):
+    global embed_title_3
+    embed_title_3 = title
+    await interaction.response.send_message(f"✅ Embed Überschrift (Panel 3) gesetzt: **{embed_title_3}**", ephemeral=True)
+
+@bot.tree.command(name="set-embed-text-3", description="Setze den Embed Text für Panel 3")
+@app_commands.check(is_admin)
+async def set_embed_text_3(interaction: discord.Interaction, text: str):
+    global embed_text_3
+    embed_text_3 = text
+    await interaction.response.send_message(f"✅ Embed Text (Panel 3) gesetzt.", ephemeral=True)
+
+@bot.tree.command(name="ticket-starten-3", description="Erstellt den Ticket Button für Panel 3")
+@app_commands.check(is_admin)
+async def ticket_starten_3(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title=embed_title_3,
+        description=embed_text_3,
+        color=SUNFLOWER_YELLOW
+    )
+    view = TicketOpenPersistentView3()
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("✅ Ticket-Nachricht (Panel 3) wurde gesendet.", ephemeral=True)
+
+# ================= ERROR HANDLER =================
+@create_ticket_in.error
+@set_ticket_mod.error
+@ticket_starten.error
+@create_ticket_in_2.error
+@set_ticket_mod_2.error
+@set_embed_überschrift_2.error
+@set_embed_text_2.error
+@ticket_starten_2.error
+@create_ticket_in_3.error
+@set_ticket_mod_3.error
+@set_embed_überschrift_3.error
+@set_embed_text_3.error
+@ticket_starten_3.error
+async def admin_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message("❌ Du hast keine Administratorrechte, um diesen Befehl zu nutzen.", ephemeral=True)
+
+# ================= HELPER FUNKTION =================
+async def user_has_open_ticket(guild, user, category_id):
+    """Überprüft, ob der Nutzer bereits ein Ticket in der Kategorie hat."""
+    category = guild.get_channel(category_id)
+    if not category:
+        return False
+    for channel in category.text_channels:
+        if channel.permissions_for(user).view_channel:
+            if str(user.id) in [str(o.id) for o in channel.overwrites if isinstance(o, discord.Member)]:
+                return True
+    return False
+
+# ================= BUTTON VIEWS =================
+# PANEL 1
+class TicketOpenPersistentView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="📨 Ticket erstellen", style=discord.ButtonStyle.primary, custom_id="ticket_open")
+    async def ticket_open_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        global ticket_count, ticket_category_id, ticket_mod_role_id
+        if ticket_category_id is None:
+            await interaction.response.send_message("❌ Es wurde keine Ticket-Kategorie gesetzt!", ephemeral=True)
+            return
+        
+        if await user_has_open_ticket(interaction.guild, interaction.user, ticket_category_id):
+            await interaction.response.send_message("⚠️ Du hast bereits ein offenes Ticket in diesem Panel.", ephemeral=True)
+            return
+
+        ticket_count += 1
+        guild = interaction.guild
+        category = guild.get_channel(ticket_category_id)
+        if category is None:
+            await interaction.response.send_message("❌ Die angegebene Kategorie existiert nicht oder ist ungültig.", ephemeral=True)
+            return
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True),
+        }
+
+        if ticket_mod_role_id:
+            role = guild.get_role(ticket_mod_role_id)
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+        channel = await guild.create_text_channel(
+            name=f"mg-ticket-{ticket_count}",
+            category=category,
+            overwrites=overwrites
+        )
+
+        ping_msg = f"<@{interaction.user.id}>"
+        if ticket_mod_role_id:
+            ping_msg += f" <@&{ticket_mod_role_id}>"
+
+        await channel.send(ping_msg)
+
+        embed = discord.Embed(
+            description="Bitte haben Sie ein wenig Geduld, der Support wird sich um Sie kümmern.",
+            color=SUNFLOWER_YELLOW
+        )
+        view = TicketClosePersistentView()
+        await channel.send(embed=embed, view=view)
+        await interaction.response.send_message(f"✅ Ticket erstellt: {channel.mention}", ephemeral=True)
+
+class TicketClosePersistentView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="❌ Ticket schließen", style=discord.ButtonStyle.danger, custom_id="ticket_close")
+    async def ticket_close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = ConfirmCloseView(interaction.channel)
+        await interaction.response.send_message("Möchtest du das Ticket wirklich schließen?", view=view, ephemeral=True)
+
+# PANEL 2
+class TicketOpenPersistentView2(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="📨 Ticket erstellen", style=discord.ButtonStyle.primary, custom_id="ticket_open_2")
+    async def ticket_open_button_2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        global ticket_count_2, ticket_category_id_2, ticket_mod_role_id_2
+        if ticket_category_id_2 is None:
+            await interaction.response.send_message("❌ Es wurde keine Ticket-Kategorie gesetzt!", ephemeral=True)
+            return
+        
+        if await user_has_open_ticket(interaction.guild, interaction.user, ticket_category_id_2):
+            await interaction.response.send_message("⚠️ Du hast bereits ein offenes Ticket in diesem Panel.", ephemeral=True)
+            return
+
+        ticket_count_2 += 1
+        guild = interaction.guild
+        category = guild.get_channel(ticket_category_id_2)
+        if category is None:
+            await interaction.response.send_message("❌ Die angegebene Kategorie existiert nicht oder ist ungültig.", ephemeral=True)
+            return
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True),
+        }
+
+        if ticket_mod_role_id_2:
+            role = guild.get_role(ticket_mod_role_id_2)
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+        channel = await guild.create_text_channel(
+            name=f"mg-ticket-{ticket_count_2}",
+            category=category,
+            overwrites=overwrites
+        )
+
+        ping_msg = f"<@{interaction.user.id}>"
+        if ticket_mod_role_id_2:
+            ping_msg += f" <@&{ticket_mod_role_id_2}>"
+
+        await channel.send(ping_msg)
+
+        embed = discord.Embed(
+            description="Bitte haben Sie ein wenig Geduld, der Support wird sich um Sie kümmern.",
+            color=SUNFLOWER_YELLOW
+        )
+        view = TicketClosePersistentView2()
+        await channel.send(embed=embed, view=view)
+        await interaction.response.send_message(f"✅ Ticket erstellt: {channel.mention}", ephemeral=True)
+
+class TicketClosePersistentView2(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="❌ Ticket schließen", style=discord.ButtonStyle.danger, custom_id="ticket_close_2")
+    async def ticket_close_button_2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = ConfirmCloseView(interaction.channel)
+        await interaction.response.send_message("Möchtest du das Ticket wirklich schließen?", view=view, ephemeral=True)
+
+# PANEL 3
+class TicketOpenPersistentView3(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="📨 Ticket erstellen", style=discord.ButtonStyle.primary, custom_id="ticket_open_3")
+    async def ticket_open_button_3(self, interaction: discord.Interaction, button: discord.ui.Button):
+        global ticket_count_3, ticket_category_id_3, ticket_mod_role_id_3
+        if ticket_category_id_3 is None:
+            await interaction.response.send_message("❌ Es wurde keine Ticket-Kategorie gesetzt!", ephemeral=True)
+            return
+        
+        if await user_has_open_ticket(interaction.guild, interaction.user, ticket_category_id_3):
+            await interaction.response.send_message("⚠️ Du hast bereits ein offenes Ticket in diesem Panel.", ephemeral=True)
+            return
+
+        ticket_count_3 += 1
+        guild = interaction.guild
+        category = guild.get_channel(ticket_category_id_3)
+        if category is None:
+            await interaction.response.send_message("❌ Die angegebene Kategorie existiert nicht oder ist ungültig.", ephemeral=True)
+            return
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True),
+        }
+
+        if ticket_mod_role_id_3:
+            role = guild.get_role(ticket_mod_role_id_3)
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+        channel = await guild.create_text_channel(
+            name=f"mg-ticket-{ticket_count_3}",
+            category=category,
+            overwrites=overwrites
+        )
+
+        ping_msg = f"<@{interaction.user.id}>"
+        if ticket_mod_role_id_3:
+            ping_msg += f" <@&{ticket_mod_role_id_3}>"
+
+        await channel.send(ping_msg)
+
+        embed = discord.Embed(
+            description="Bitte haben Sie ein wenig Geduld, der Support wird sich um Sie kümmern.",
+            color=SUNFLOWER_YELLOW
+        )
+        view = TicketClosePersistentView3()
+        await channel.send(embed=embed, view=view)
+        await interaction.response.send_message(f"✅ Ticket erstellt: {channel.mention}", ephemeral=True)
+
+class TicketClosePersistentView3(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="❌ Ticket schließen", style=discord.ButtonStyle.danger, custom_id="ticket_close_3")
+    async def ticket_close_button_3(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = ConfirmCloseView(interaction.channel)
+        await interaction.response.send_message("Möchtest du das Ticket wirklich schließen?", view=view, ephemeral=True)
+
+# ================= CONFIRM CLOSE =================
+class ConfirmCloseView(discord.ui.View):
+    def __init__(self, channel):
+        super().__init__(timeout=30)
+        self.channel = channel
+        self.add_item(ConfirmYesButton(channel))
+        self.add_item(ConfirmNoButton())
+
+class ConfirmYesButton(discord.ui.Button):
+    def __init__(self, channel):
+        super().__init__(label="Ja", style=discord.ButtonStyle.success, custom_id="confirm_yes")
+        self.channel = channel
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_message("✅ Ticket wird geschlossen...", ephemeral=True)
+        await asyncio.sleep(2)
+        await self.channel.delete()
+
+class ConfirmNoButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Nein", style=discord.ButtonStyle.secondary, custom_id="confirm_no")
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_message("❌ Ticket bleibt geöffnet.", ephemeral=True)
+
+# =================== $close COMMAND ===================
+@bot.command(name="close")
+async def close_ticket(ctx):
+    """Schließt ein Ticket über den Textbefehl $close (egal welches Panel)."""
+    if isinstance(ctx.channel, discord.TextChannel):
+        if ctx.channel.name.lower().startswith(("mg-ticket-")):
+            await ctx.send("✅ Ticket wird geschlossen...")
+            await asyncio.sleep(2)
+            await ctx.channel.delete()
+        else:
+            await ctx.send("❌ Dieser Befehl kann nur in einem Ticket-Channel verwendet werden.")
+    else:
+        await ctx.send("❌ Dieser Befehl kann nur in einem Textkanal verwendet werden.")
+
+# ================= START BOT =================
+bot.run(os.getenv("DISCORD_TOKEN"))
