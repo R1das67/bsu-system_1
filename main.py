@@ -5,6 +5,7 @@ from discord import app_commands
 import aiohttp
 import json
 from typing import List, Dict, Optional
+import time
 
 # -----------------------------
 # CONFIG
@@ -143,6 +144,21 @@ async def set_panic_role(interaction: discord.Interaction, role: discord.Role):
 # ROBLOX TRACKING
 # -----------------------------
 last_status: Dict[int, str] = {}  # userId -> "ONLINE"/"OFFLINE"
+online_start_times: Dict[int, float] = {}  # userId -> online start time
+
+def format_played_time(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)} sec"
+    elif seconds < 3600:
+        return f"{int(seconds//60)} min {int(seconds%60)} sec"
+    elif seconds < 86400:
+        h = int(seconds//3600)
+        m = int((seconds%3600)//60)
+        return f"{h} h {m} min"
+    else:
+        d = int(seconds//86400)
+        h = int((seconds%86400)//3600)
+        return f"{d} d {h} h"
 
 async def roblox_get_user_by_username(session: aiohttp.ClientSession, username: str) -> Optional[Dict]:
     url = "https://users.roblox.com/v1/usernames/users"
@@ -185,6 +201,8 @@ async def roblox_get_avatar_url(session: aiohttp.ClientSession, user_id: int, si
     return None
 
 async def roblox_resolve_game_name(session: aiohttp.ClientSession, place_id: Optional[int], last_location: Optional[str]) -> str:
+    if last_location:
+        return str(last_location)
     if place_id:
         url = "https://games.roblox.com/v1/games/multiget-place-details"
         params = {"placeIds": str(place_id)}
@@ -196,21 +214,19 @@ async def roblox_resolve_game_name(session: aiohttp.ClientSession, place_id: Opt
                         return js[0].get("name", str(place_id))
         except:
             pass
-    if last_location:
-        return str(last_location)
     return "Unbekannt"
 
 def build_online_embed(display_name: str, username: str, game_name: str, avatar_url: Optional[str]) -> discord.Embed:
     title = "🟢**Online!**🟢"
-    description = f"**{display_name} ({username})** is online!\n\nHe/She play: **{game_name}**"
+    description = f"**{display_name} ({username})** is online!\nHe/She play: **{game_name}**"
     e = discord.Embed(title=title, description=description, color=COLOR_GREEN)
     if avatar_url:
         e.set_thumbnail(url=avatar_url)
     return e
 
-def build_offline_embed(display_name: str, username: str, avatar_url: Optional[str]) -> discord.Embed:
+def build_offline_embed(display_name: str, username: str, avatar_url: Optional[str], played_str: str = "") -> discord.Embed:
     title = "🔴**Offline!**🔴"
-    description = f"**{display_name} ({username})** is offline!\n\nHe/She is now offline!"
+    description = f"**{display_name} ({username})** is offline!\nHe/She is now offline!{played_str}"
     e = discord.Embed(title=title, description=description, color=COLOR_RED)
     if avatar_url:
         e.set_thumbnail(url=avatar_url)
@@ -318,11 +334,19 @@ async def presence_poll():
                     last_status[uid] = current
                     avatar_url = await roblox_get_avatar_url(session, uid)
                     game_name = await roblox_resolve_game_name(session, place_id, last_location)
+
+                    if current == "ONLINE":
+                        online_start_times[uid] = time.time()
+                        embed = build_online_embed(display_name, username, game_name, avatar_url)
+                    else:  # Offline
+                        start_time = online_start_times.pop(uid, None)
+                        played_str = ""
+                        if start_time:
+                            played_sec = time.time() - start_time
+                            played_str = f"\nPlayed for: {format_played_time(played_sec)}"
+                        embed = build_offline_embed(display_name, username, avatar_url, played_str)
+
                     try:
-                        if current == "ONLINE":
-                            embed = build_online_embed(display_name, username, game_name, avatar_url)
-                        else:
-                            embed = build_offline_embed(display_name, username, avatar_url)
                         await log_channel.send(embed=embed)
                     except Exception as e:
                         print(f"Fehler Embed senden für {username}: {e}")
