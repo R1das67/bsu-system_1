@@ -171,6 +171,27 @@ async def roblox_get_presences(session: aiohttp.ClientSession, user_ids: List[in
     except:
         return {}
 
+# -----------------------------
+# NEW: JOIN-STATUS ABFRAGE
+# -----------------------------
+async def roblox_get_join_setting(session: aiohttp.ClientSession, user_id: int) -> str:
+    url = f"https://friends.roblox.com/v1/users/{user_id}/canfollow"
+    try:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status != 200:
+                return "Unbekannt"
+            data = await resp.json()
+            allowed = data.get("canFollow")
+
+            if allowed is True:
+                return "Für alle"
+            elif allowed is False:
+                return "Nur Follower/aus"
+            else:
+                return "Unbekannt"
+    except:
+        return "Unbekannt"
+
 async def roblox_get_avatar_url(session: aiohttp.ClientSession, user_id: int, size: int = 150) -> Optional[str]:
     url = "https://thumbnails.roblox.com/v1/users/avatar-headshot"
     params = {"userIds": str(user_id), "size": str(size), "format": "Png", "isCircular": "false"}
@@ -185,10 +206,13 @@ async def roblox_get_avatar_url(session: aiohttp.ClientSession, user_id: int, si
         return None
     return None
 
-def build_online_embed(display_name: str, username: str, avatar_url: Optional[str]) -> discord.Embed:
+def build_online_embed(display_name: str, username: str, avatar_url: Optional[str], join_setting: str) -> discord.Embed:
     title = "🟢**Online!**🟢"
     description = f"**{display_name} ({username})** is online!"
     e = discord.Embed(title=title, description=description, color=COLOR_GREEN)
+
+    e.add_field(name="Join", value=join_setting, inline=False)
+
     if avatar_url:
         e.set_thumbnail(url=avatar_url)
     return e
@@ -316,7 +340,10 @@ async def presence_poll():
 
                     if current == "ONLINE":
                         online_start_times[uid] = time.time()
-                        embed = build_online_embed(display_name, username, avatar_url)
+
+                        join_setting = await roblox_get_join_setting(session, uid)
+
+                        embed = build_online_embed(display_name, username, avatar_url, join_setting)
                     else:
                         start_time = online_start_times.pop(uid, None)
                         played_str = ""
