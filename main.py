@@ -172,7 +172,38 @@ async def roblox_get_presences(session: aiohttp.ClientSession, user_ids: List[in
         return {}
 
 # -----------------------------
-# NEW: JOIN-STATUS ABFRAGE
+# NEW: GAME-INFO (DEIN WUNSCH)
+# -----------------------------
+async def roblox_get_game_data(session: aiohttp.ClientSession, place_id: int):
+    url = f"https://games.roblox.com/v1/games?universeIds={place_id}"
+    try:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status != 200:
+                return None
+            js = await resp.json()
+            return js["data"][0]["name"]
+    except:
+        return None
+
+async def roblox_get_game_info_from_presence(pres: dict, session: aiohttp.ClientSession):
+    place_id = pres.get("placeId")
+    game_id = pres.get("gameId")
+
+    if place_id == 0 or place_id is None:
+        return None, None, None
+
+    game_name = await roblox_get_game_data(session, place_id)
+    game_link = f"https://www.roblox.com/games/{place_id}"
+
+    if game_id is None:
+        server_type = "Öffentlicher Server"
+    else:
+        server_type = "Privatserver"
+
+    return game_name, game_link, server_type
+
+# -----------------------------
+# JOIN-STATUS
 # -----------------------------
 async def roblox_get_join_setting(session: aiohttp.ClientSession, user_id: int) -> str:
     url = f"https://friends.roblox.com/v1/users/{user_id}/canfollow"
@@ -242,14 +273,13 @@ async def choose_bounty_log(interaction: discord.Interaction, channel: discord.T
     await interaction.response.send_message(f"Log channel gesetzt auf {channel.mention}", ephemeral=True)
 
 @bot.tree.command(name="add-user", description="Add a Roblox user by ID to the tracked list")
-@app_commands.describe(user_id="Roblox user ID (numerical)")
+@app_commands.describe(user_id="Roblox user ID (numerical)"])
 async def add_user(interaction: discord.Interaction, user_id: int):
     if not admin_check(interaction):
         await interaction.response.send_message("Nur Admins dürfen diesen Befehl nutzen.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
     async with aiohttp.ClientSession() as session:
-        # Fetch user info by ID
         url = f"https://users.roblox.com/v1/users/{user_id}"
         try:
             async with session.get(url, timeout=10) as resp:
@@ -344,6 +374,14 @@ async def presence_poll():
                         join_setting = await roblox_get_join_setting(session, uid)
 
                         embed = build_online_embed(display_name, username, avatar_url, join_setting)
+
+                        game_name, game_link, server_type = await roblox_get_game_info_from_presence(pres, session)
+
+                        if game_name:
+                            embed.add_field(name="Spiel", value=game_name, inline=False)
+                            embed.add_field(name="Server", value=server_type, inline=False)
+                            embed.add_field(name="Game-Link", value=game_link, inline=False)
+
                     else:
                         start_time = online_start_times.pop(uid, None)
                         played_str = ""
