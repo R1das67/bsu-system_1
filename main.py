@@ -160,21 +160,6 @@ def format_played_time(seconds: float) -> str:
         h = int((seconds%86400)//3600)
         return f"{d} d {h} h"
 
-async def roblox_get_user_by_username(session: aiohttp.ClientSession, username: str) -> Optional[Dict]:
-    url = "https://users.roblox.com/v1/usernames/users"
-    payload = {"usernames": [username], "excludeBannedUsers": False}
-    try:
-        async with session.post(url, json=payload, timeout=10) as resp:
-            if resp.status != 200:
-                return None
-            js = await resp.json()
-            if "data" in js and len(js["data"]) > 0:
-                u = js["data"][0]
-                return {"id": u["id"], "name": u["name"], "displayName": u.get("displayName", u["name"])}
-    except:
-        return None
-    return None
-
 async def roblox_get_presences(session: aiohttp.ClientSession, user_ids: List[int]) -> Dict:
     url = "https://presence.roblox.com/v1/presence/users"
     payload = {"userIds": user_ids}
@@ -232,29 +217,40 @@ async def choose_bounty_log(interaction: discord.Interaction, channel: discord.T
     save_data()
     await interaction.response.send_message(f"Log channel gesetzt auf {channel.mention}", ephemeral=True)
 
-@bot.tree.command(name="add-user", description="Add a Roblox username to the tracked list")
-@app_commands.describe(username="Roblox username (z. B. Builderman)")
-async def add_user(interaction: discord.Interaction, username: str):
+@bot.tree.command(name="add-user", description="Add a Roblox user by ID to the tracked list")
+@app_commands.describe(user_id="Roblox user ID (numerical)")
+async def add_user(interaction: discord.Interaction, user_id: int):
     if not admin_check(interaction):
         await interaction.response.send_message("Nur Admins dürfen diesen Befehl nutzen.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
     async with aiohttp.ClientSession() as session:
-        user = await roblox_get_user_by_username(session, username)
-        if not user:
-            await interaction.followup.send(f"Roblox-User `{username}` nicht gefunden.", ephemeral=True)
+        # Fetch user info by ID
+        url = f"https://users.roblox.com/v1/users/{user_id}"
+        try:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status != 200:
+                    await interaction.followup.send(f"Roblox-User mit ID `{user_id}` nicht gefunden.", ephemeral=True)
+                    return
+                user_data = await resp.json()
+                username = user_data["name"]
+                display_name = user_data.get("displayName", username)
+        except:
+            await interaction.followup.send(f"Fehler beim Abrufen des Benutzers.", ephemeral=True)
             return
+
         for t in data["tracked"]:
-            if t["userId"] == user["id"]:
-                await interaction.followup.send(f"`{user['name']}` ist bereits in der Liste.", ephemeral=True)
+            if t["userId"] == user_id:
+                await interaction.followup.send(f"`{username}` ist bereits in der Liste.", ephemeral=True)
                 return
+
         data["tracked"].append({
-            "username": user["name"],
-            "userId": user["id"],
-            "displayName": user.get("displayName", user["name"])
+            "username": username,
+            "userId": user_id,
+            "displayName": display_name
         })
         save_data()
-        await interaction.followup.send(f"`{user['name']}` wurde hinzugefügt.", ephemeral=True)
+        await interaction.followup.send(f"`{username}` ({display_name}) wurde hinzugefügt.", ephemeral=True)
 
 @bot.tree.command(name="remove-user", description="Remove a Roblox username from the tracked list")
 @app_commands.describe(username="Roblox username to remove")
