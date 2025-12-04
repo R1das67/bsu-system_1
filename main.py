@@ -4,7 +4,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import aiohttp
 import json
-from typing import List, Dict, Optional
+from typing import List, Dict
 import time
 
 # -----------------------------
@@ -108,12 +108,11 @@ async def roblox_get_game_data(session, place_id):
     try:
         async with session.get(url, timeout=10) as resp:
             js = await resp.json()
-            return js["data"][0]["name"] if resp.status == 200 else None
+            return js["data"][0]["name"] if resp.status == 200 and js.get("data") else None
     except:
         return None
 
 async def roblox_get_game_info_from_presence(pres, session):
-    # Nutze placeId, rootPlaceId oder lastLocation
     place_id = pres.get("placeId") or pres.get("rootPlaceId")
     last_location = pres.get("lastLocation")
     game_name = None
@@ -123,15 +122,11 @@ async def roblox_get_game_info_from_presence(pres, session):
         game_name = await roblox_get_game_data(session, place_id)
         if game_name:
             game_link = f"https://www.roblox.com/games/{place_id}"
+    if not game_name:
+        if last_location:
+            game_name = last_location
         else:
-            game_name = f"Place {place_id}"
-            game_link = None
-    elif last_location:
-        game_name = last_location
-        game_link = None
-    else:
-        game_name = "Öffentlicher Server"
-        game_link = None
+            game_name = "Öffentlicher Server"
 
     return game_name, game_link, "Playing"
 
@@ -294,9 +289,11 @@ async def show_bounty_list(interaction: discord.Interaction):
 # -----------------------------
 @tasks.loop(seconds=POLL_INTERVAL)
 async def presence_poll():
-    if not bot.is_ready() or not data.get("tracked") or not data.get("log_channel"): return
+    if not bot.is_ready() or not data.get("tracked") or not data.get("log_channel"):
+        return
     log_channel = bot.get_channel(data["log_channel"])
-    if not log_channel: return
+    if not log_channel:
+        return
     user_ids = [t["userId"] for t in data["tracked"]]
     async with aiohttp.ClientSession() as session:
         resp = await roblox_get_presences(session, user_ids)
@@ -309,6 +306,8 @@ async def presence_poll():
             ptype = pres.get("userPresenceType", 0)
             status = "OFFLINE" if ptype == 0 else "MENU" if ptype == 1 else "PLAYING"
             prev = last_status.get(uid)
+
+            # Wenn Status sich ändert → Embed
             if status != prev:
                 last_status[uid] = status
                 avatar = await roblox_get_avatar_url(session, uid)
@@ -337,7 +336,8 @@ async def presence_poll():
 async def on_ready():
     bot.add_view(PanicButtonView())
     await bot.tree.sync()
-    if not presence_poll.is_running(): presence_poll.start()
+    if not presence_poll.is_running(): 
+        presence_poll.start()
     print(f"Bot ist online als {bot.user}")
 
 bot.run(TOKEN)
