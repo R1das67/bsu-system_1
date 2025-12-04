@@ -73,7 +73,10 @@ class PanicModal(discord.ui.Modal, title="🚨 Panic Request"):
         channel = interaction.client.get_channel(panic_channel_id)
         role_ping = f"<@&{panic_role_id}>"
 
-        embed = discord.Embed(title=f"🚨 Panic Button pressed by {interaction.user}", color=RED)
+        embed = discord.Embed(
+            title=f"🚨 Panic Button pressed by {interaction.user}", 
+            color=RED
+        )
         embed.add_field(name="Roblox Username", value=self.username.value, inline=False)
         embed.add_field(name="Location", value=self.location.value, inline=False)
         embed.add_field(name="Additional Information", value=self.additional_info.value or "Keine", inline=False)
@@ -118,10 +121,13 @@ async def roblox_get_game_info_from_presence(pres, session):
     game_name = None
     game_link = None
 
+    # Zuerst Spielname von Roblox API
     if place_id:
         game_name = await roblox_get_game_data(session, place_id)
         if game_name:
             game_link = f"https://www.roblox.com/games/{place_id}"
+
+    # Fallbacks
     if not game_name:
         if last_location:
             game_name = last_location
@@ -307,7 +313,7 @@ async def presence_poll():
             status = "OFFLINE" if ptype == 0 else "MENU" if ptype == 1 else "PLAYING"
             prev = last_status.get(uid)
 
-            # Wenn Status sich ändert → Embed
+            # Status-Änderung
             if status != prev:
                 last_status[uid] = status
                 avatar = await roblox_get_avatar_url(session, uid)
@@ -336,7 +342,7 @@ async def presence_poll():
 async def on_ready():
     bot.add_view(PanicButtonView())
     await bot.tree.sync()
-    if not presence_poll.is_running(): 
+    if not presence_poll.is_running():
         presence_poll.start()
     print(f"Bot ist online als {bot.user}")
 
