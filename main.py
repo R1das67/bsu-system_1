@@ -290,6 +290,7 @@ async def presence_poll():
             status = "OFFLINE" if ptype == 0 else "MENU" if ptype == 1 else "PLAYING"
             prev = last_status.get(uid)
 
+            # Nur senden, wenn sich der Status geändert hat
             if status != prev:
                 last_status[uid] = status
                 avatar = await roblox_get_avatar_url(session, uid)
