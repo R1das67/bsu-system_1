@@ -159,7 +159,7 @@ def embed_playing(display, username, avatar, game_name, game_link):
         description=description,
         color=COLOR_PLAYING
     )
-    if avatar: e.set_thumbnail(url=avatar)
+    if avatar: e.set_thumbnail(url=avatar)  # Avatar rechts
     if game_link: e.set_author(name=game_name, url=game_link)
     return e
 
@@ -287,26 +287,28 @@ async def presence_poll():
             display = t.get("displayName", username)
             pres = presences.get(uid, {})
             ptype = pres.get("userPresenceType", 0)
-            status = "OFFLINE" if ptype == 0 else "MENU" if ptype == 1 else "PLAYING"
-            prev = last_status.get(uid)
+            current_status = "OFFLINE" if ptype == 0 else "MENU" if ptype == 1 else "PLAYING"
+            prev_status = last_status.get(uid)
 
-            # Nur senden, wenn sich der Status geändert hat
-            if status != prev:
-                last_status[uid] = status
+            # Wenn Status sich geändert hat
+            if current_status != prev_status:
+                last_status[uid] = current_status
                 avatar = await roblox_get_avatar_url(session, uid)
 
-                if status == "PLAYING":
+                if current_status == "PLAYING":
                     online_start_times.setdefault(uid, time.time())
                     game_name, game_link, _ = await roblox_get_game_info_from_presence(pres, session)
                     embed = embed_playing(display, username, avatar, game_name, game_link)
+                    await log_channel.send(embed=embed)
 
-                else:  # OFFLINE
-                    start = online_start_times.pop(uid, None)
-                    played = int(time.time() - start) if start else 0
-                    played_fmt = format_played_time(played)
-                    embed = embed_offline(display, username, avatar, played_fmt)
-
-                await log_channel.send(embed=embed)
+                elif current_status == "OFFLINE":
+                    # Offline-Embed nur senden, wenn vorher nicht offline
+                    if prev_status != "OFFLINE":
+                        start = online_start_times.pop(uid, None)
+                        played = int(time.time() - start) if start else 0
+                        played_fmt = format_played_time(played)
+                        embed = embed_offline(display, username, avatar, played_fmt)
+                        await log_channel.send(embed=embed)
 
 # -----------------------------
 # READY
