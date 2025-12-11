@@ -1,324 +1,424 @@
 import os
+import re
+import asyncio
+from datetime import datetime, timedelta, timezone
+from collections import defaultdict, deque
+
 import discord
-from discord.ext import commands, tasks
-from discord import app_commands
-import aiohttp
-import json
-from typing import List, Dict
-import time
+from discord import AuditLogAction, Forbidden, HTTPException, NotFound
+from discord.ext import commands
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-TOKEN = os.getenv("DISCORD_TOKEN")
-if not TOKEN:
-    raise ValueError("❌ TOKEN nicht gesetzt!")
+# ---------- Konfiguration ----------
+TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+BOT_ADMIN_ID = 843180408152784936
 
-DATA_FILE = "bot_data.json"
-POLL_INTERVAL = 30  # Sekunden
+# Invite-Settings
+INVITE_SPAM_WINDOW_SECONDS = 45
+INVITE_SPAM_THRESHOLD = 5
+INVITE_TIMEOUT_HOURS = 1
 
+# Anti-Webhook Settings
+WEBHOOK_STRIKES_BEFORE_KICK = 3
+
+# Anti Ban/Kick Spamm Settings
+ANTI_BAN_KICK_WINDOW_SECONDS = 60
+ANTI_BAN_KICK_THRESHOLD = 3
+
+# Anti Mention Spam Settings
+MENTION_SPAM_WINDOW_SECONDS = 30
+MENTION_SPAM_THRESHOLD = 3
+
+VERBOSE = True
+
+# ---------- Bot & Intents ----------
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
 intents.guilds = True
+intents.members = True
+intents.bans = True
+intents.webhooks = True
+intents.guild_messages = True
 
-bot = commands.Bot(command_prefix="$", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# -----------------------------
-# DATA HANDLING
-# -----------------------------
-if os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "r") as f:
-        data = json.load(f)
-else:
-    data = {
-        "panic_channel": None,
-        "panic_role": None,
-        "tracked": [],
-        "log_channel": None
-    }
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+# ---------- Hilfsfunktionen ----------
+INVITE_REGEX = re.compile(
+    r"(?:https?://)?(?:www\.)?(?:discord\.gg|discord\.com/invite|discordapp\.com/invite)/[A-Za-z0-9\-]+",
+    re.IGNORECASE,
+)
 
-def save_data():
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+whitelists: dict[int, set[int]] = defaultdict(set)
+blacklists: dict[int, set[int]] = defaultdict(set)
 
-# -----------------------------
-# COLORS
-# -----------------------------
-RED = discord.Color.red()
-COLOR_PLAYING = discord.Color.from_rgb(64, 255, 64)
-COLOR_OFFLINE = discord.Color.from_rgb(255, 64, 64)
+invite_timestamps: dict[int, deque[float]] = defaultdict(lambda: deque(maxlen=50))
+webhook_strikes: defaultdict[int, int] = defaultdict(int)
+existing_webhooks: dict[int, set[int]] = defaultdict(set)
 
-# -----------------------------
-# PANIC SYSTEM
-# -----------------------------
-class PanicModal(discord.ui.Modal, title="🚨 Panic Request"):
-    username = discord.ui.TextInput(label="Roblox Username", required=True)
-    location = discord.ui.TextInput(label="Location", required=True)
-    additional_info = discord.ui.TextInput(label="Additional Information", required=False)
+ban_kick_actions: dict[int, deque[float]] = defaultdict(lambda: deque(maxlen=10))
+mention_timestamps: dict[int, deque[float]] = defaultdict(lambda: deque(maxlen=10))
+mention_messages: dict[int, deque[discord.Message]] = defaultdict(lambda: deque(maxlen=10))
 
-    async def on_submit(self, interaction: discord.Interaction):
-        panic_channel_id = data.get("panic_channel")
-        panic_role_id = data.get("panic_role")
-        if panic_channel_id is None or panic_role_id is None:
-            await interaction.response.send_message("❌ Panic-Channel oder Panic-Rolle nicht gesetzt!", ephemeral=True)
-            return
+def log(*args):
+    if VERBOSE:
+        print("[LOG]", *args)
 
-        channel = interaction.client.get_channel(panic_channel_id)
-        role_ping = f"<@&{panic_role_id}>"
-
-        embed = discord.Embed(title=f"🚨 Panic Button pressed by {interaction.user}", color=RED)
-        embed.add_field(name="Roblox Username", value=self.username.value, inline=False)
-        embed.add_field(name="Location", value=self.location.value, inline=False)
-        embed.add_field(name="Additional Information", value=self.additional_info.value or "Keine", inline=False)
-
-        await channel.send(f"**__🚨{role_ping} panic!🚨__**", embed=embed)
-        await interaction.response.send_message("✅ Panic Alert gesendet!", ephemeral=True)
-
-class PanicButtonView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="🚨 Panic", style=discord.ButtonStyle.danger, custom_id="panic_button")
-    async def panic_button_callback(self, interaction, button):
-        await interaction.response.send_modal(PanicModal())
-
-# -----------------------------
-# ROBLOX API HELPERS
-# -----------------------------
-last_status: Dict[int, str] = {}
-online_start_times: Dict[int, float] = {}
-
-async def roblox_get_presences(session, user_ids: List[int]):
-    url = "https://presence.roblox.com/v1/presence/users"
+async def safe_delete_message(msg: discord.Message):
     try:
-        async with session.post(url, json={"userIds": user_ids}, timeout=10) as resp:
-            return await resp.json() if resp.status == 200 else {}
-    except:
-        return {}
+        await msg.delete()
+    except (NotFound, Forbidden, HTTPException):
+        pass
 
-async def roblox_get_game_data(session, place_id):
-    url = f"https://games.roblox.com/v1/games?universeIds={place_id}"
+def is_whitelisted(member: discord.Member | discord.User) -> bool:
+    gid = getattr(getattr(member, "guild", None), "id", None)
+    if gid is None:
+        return False
+    return member.id in whitelists[gid]
+
+def is_blacklisted(member: discord.Member | discord.User) -> bool:
+    gid = getattr(getattr(member, "guild", None), "id", None)
+    if gid is None:
+        return False
+    return member.id in blacklists[gid]
+
+def is_bot_admin(interaction: discord.Interaction) -> bool:
+    return interaction.user.id == BOT_ADMIN_ID or (interaction.guild and interaction.user.id == interaction.guild.owner_id)
+
+async def kick_member(guild: discord.Guild, member: discord.Member | discord.User, reason: str):
+    if not member or (isinstance(member, discord.Member) and is_whitelisted(member)):
+        return
+    if member.id == bot.user.id:
+        return
     try:
-        async with session.get(url, timeout=10) as resp:
-            if resp.status != 200: return None
-            js = await resp.json()
-            return js["data"][0]["name"] if js.get("data") else None
-    except:
-        return None
+        await guild.kick(discord.Object(id=member.id), reason=reason)
+        log(f"Kicked {member} | Reason: {reason}")
+    except (Forbidden, HTTPException, NotFound) as e:
+        log(f"Kick failed for {member}: {e}")
 
-async def roblox_get_game_info_from_presence(pres, session):
-    place_id = pres.get("placeId") or pres.get("rootPlaceId")
-    last_location = pres.get("lastLocation")
-    game_name = None
-    game_link = None
-
-    if place_id:
-        game_name = await roblox_get_game_data(session, place_id)
-        if game_name:
-            game_link = f"https://www.roblox.com/games/{place_id}"
-    if not game_name:
-        game_name = last_location or "Öffentlicher Server"
-
-    return game_name, game_link, "Playing"
-
-async def roblox_get_avatar_url(session, user_id, size=150):
-    url = "https://thumbnails.roblox.com/v1/users/avatar-headshot"
-    params = {"userIds": str(user_id), "size": str(size), "format": "Png", "isCircular": "false"}
+async def ban_member(guild: discord.Guild, member: discord.Member | discord.User, reason: str, delete_days: int = 0):
+    if not member or (isinstance(member, discord.Member) and is_whitelisted(member)):
+        return
+    if member.id == bot.user.id:
+        return
     try:
-        async with session.get(url, params=params, timeout=10) as resp:
-            js = await resp.json()
-            return js.get("data", [{}])[0].get("imageUrl")
-    except:
-        return None
+        await guild.ban(discord.Object(id=member.id), reason=reason, delete_message_days=delete_days)
+        log(f"Banned {member} | Reason: {reason}")
+    except (Forbidden, HTTPException, NotFound) as e:
+        log(f"Ban failed for {member}: {e}")
 
-# -----------------------------
-# TIME FORMATTER
-# -----------------------------
-def format_played_time(seconds: int) -> str:
-    if seconds < 60:
-        return f"{seconds} sec"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes} min {seconds % 60} sec"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours} h {minutes % 60} min"
-    days = hours // 24
-    return f"{days} d {hours % 24} h"
-
-# -----------------------------
-# EMBED BUILDERS
-# -----------------------------
-def embed_playing(display, username, avatar, game_name, game_link):
-    description = f"**{display} ({username})** is now playing!\nLocation: {game_name or 'Unbekannt'}"
-    e = discord.Embed(
-        title="🟢 Playing",
-        description=description,
-        color=COLOR_PLAYING
-    )
-    if avatar: e.set_thumbnail(url=avatar)  # Avatar rechts
-    if game_link: e.set_author(name=game_name, url=game_link)
-    return e
-
-def embed_offline(display, username, avatar, played_str):
-    e = discord.Embed(
-        title="🔴 Offline",
-        description=f"**{display} ({username})** is offline!\nPlayed for: {played_str}",
-        color=COLOR_OFFLINE
-    )
-    if avatar: e.set_thumbnail(url=avatar)
-    return e
-
-# -----------------------------
-# SLASH COMMANDS
-# -----------------------------
-def is_admin(interaction: discord.Interaction):
-    return interaction.user.guild_permissions.administrator
-
-@bot.tree.command(name="create-panic-button", description="Erstellt den Panic Button")
-async def create_panic_button(interaction: discord.Interaction):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ Nur Admins dürfen diesen Befehl nutzen.", ephemeral=True)
+async def timeout_member(member: discord.Member, hours: int, reason: str):
+    if not member or is_whitelisted(member):
         return
-    embed = discord.Embed(title="🚨 Panic Button", description="Drücke den Button wenn du Hilfe brauchst.", color=RED)
-    view = PanicButtonView()
-    await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message("✅ Panic Button erstellt!", ephemeral=True)
-
-@bot.tree.command(name="set-panic-channel", description="Setze den Panic Channel")
-async def set_panic_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ Nur Admins dürfen diesen Befehl nutzen.", ephemeral=True)
+    if member.id == bot.user.id:
         return
-    data["panic_channel"] = channel.id
-    save_data()
-    await interaction.response.send_message(f"Panic Channel gesetzt auf {channel.mention}", ephemeral=True)
+    try:
+        until = datetime.now(timezone.utc) + timedelta(hours=hours)
+        await member.edit(timed_out_until=until, reason=reason)
+        log(f"Timed out {member} until {until} | Reason: {reason}")
+    except (Forbidden, HTTPException, NotFound) as e:
+        log(f"Timeout failed for {member}: {e}")
 
-@bot.tree.command(name="set-panic-role", description="Setze die Panic Rolle")
-async def set_panic_role(interaction: discord.Interaction, role: discord.Role):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ Nur Admins dürfen diesen Befehl nutzen.", ephemeral=True)
-        return
-    data["panic_role"] = role.id
-    save_data()
-    await interaction.response.send_message(f"Panic Rolle gesetzt auf {role.mention}", ephemeral=True)
+# -----------------------------------------------------------
+#  🔥 OPTIMIERTER ABSCHNITT (0.1 / 0.2 / 0.3 Retry System)
+# -----------------------------------------------------------
+async def actor_from_audit_log(guild: discord.Guild, action: AuditLogAction, target_id: int | None = None, within_seconds: int = 10):
 
-@bot.tree.command(name="choose-bounty-log", description="Setze Log-Channel für Status Embeds")
-async def choose_bounty_log(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ Nur Admins dürfen diesen Befehl nutzen.", ephemeral=True)
-        return
-    data["log_channel"] = channel.id
-    save_data()
-    await interaction.response.send_message(f"Log channel gesetzt auf {channel.mention}", ephemeral=True)
+    # Neuer Abschnitt (statt festem sleep(0.35))
+    for delay in (0.05,0.1, 0.2, 0.3):
+        await asyncio.sleep(delay)
 
-@bot.tree.command(name="add-user", description="Füge einen Roblox User zur Liste hinzu")
-async def add_user(interaction: discord.Interaction, user_id: int):
-    if not is_admin(interaction):
-        await interaction.response.send_message("Nur Admins dürfen diesen Befehl nutzen.", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
-    async with aiohttp.ClientSession() as session:
-        url = f"https://users.roblox.com/v1/users/{user_id}"
         try:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status != 200:
-                    await interaction.followup.send(f"Roblox-User mit ID `{user_id}` nicht gefunden.", ephemeral=True)
-                    return
-                user_data = await resp.json()
-                username = user_data["name"]
-                display_name = user_data.get("displayName", username)
-        except:
-            await interaction.followup.send(f"Fehler beim Abrufen des Benutzers.", ephemeral=True)
-            return
-        for t in data["tracked"]:
-            if t["userId"] == user_id:
-                await interaction.followup.send(f"`{username}` ist bereits in der Liste.", ephemeral=True)
-                return
-        data["tracked"].append({"username": username, "userId": user_id, "displayName": display_name})
-        save_data()
-        await interaction.followup.send(f"`{username}` ({display_name}) wurde hinzugefügt.", ephemeral=True)
+            now = datetime.now(timezone.utc)
+            async for entry in guild.audit_logs(limit=15, action=action):
+                if (now - entry.created_at).total_seconds() > within_seconds:
+                    continue
+                if target_id is not None and getattr(entry.target, "id", None) != target_id:
+                    continue
+                return entry.user
+        except Forbidden:
+            log("Keine Berechtigung, Audit-Logs zu lesen.")
+        except NotFound:
+            log(f"Audit Log Fehler: Guild {guild.id} nicht gefunden.")
+        except HTTPException as e:
+            log(f"Audit Log HTTP-Fehler: {e}")
 
-@bot.tree.command(name="remove-user", description="Entferne einen Roblox User aus der Liste")
-async def remove_user(interaction: discord.Interaction, username: str):
-    if not is_admin(interaction):
-        await interaction.response.send_message("Nur Admins dürfen diesen Befehl nutzen.", ephemeral=True)
-        return
-    removed = None
-    for t in list(data["tracked"]):
-        if t["username"].lower() == username.lower():
-            removed = t
-            data["tracked"].remove(t)
-            save_data()
-            break
-    if removed:
-        await interaction.response.send_message(f"`{removed['username']}` entfernt.", ephemeral=True)
-    else:
-        await interaction.response.send_message(f"`{username}` nicht gefunden.", ephemeral=True)
+    return None
+# -----------------------------------------------------------
 
-@bot.tree.command(name="show-bounty-list", description="Zeige die Liste der getrackten Roblox User")
-async def show_bounty_list(interaction: discord.Interaction):
-    if not data.get("tracked"):
-        await interaction.response.send_message("Keine Spieler in der Liste.", ephemeral=False)
-        return
-    lines = [f"- **{t.get('displayName','-')}** (`{t.get('username')}`)" for t in data["tracked"]]
-    await interaction.response.send_message("**Tracked Players:**\n" + "\n".join(lines), ephemeral=False)
 
-# -----------------------------
-# BACKGROUND POLLING
-# -----------------------------
-@tasks.loop(seconds=POLL_INTERVAL)
-async def presence_poll():
-    if not bot.is_ready() or not data.get("tracked") or not data.get("log_channel"): 
-        return
-    log_channel = bot.get_channel(data["log_channel"])
-    if not log_channel: 
-        return
-    user_ids = [t["userId"] for t in data["tracked"]]
-    async with aiohttp.ClientSession() as session:
-        resp = await roblox_get_presences(session, user_ids)
-        presences = {p["userId"]: p for p in resp.get("userPresences", [])}
-        for t in data["tracked"]:
-            uid = t["userId"]
-            username = t["username"]
-            display = t.get("displayName", username)
-            pres = presences.get(uid, {})
-            ptype = pres.get("userPresenceType", 0)
-            current_status = "OFFLINE" if ptype == 0 else "MENU" if ptype == 1 else "PLAYING"
-            prev_status = last_status.get(uid)
+# ---------- Nachricht an Eigentümer nach Neustart ----------
+async def notify_owner_after_restart():
+    await asyncio.sleep(3)
 
-            # Wenn Status sich geändert hat
-            if current_status != prev_status:
-                last_status[uid] = current_status
-                avatar = await roblox_get_avatar_url(session, uid)
+    message_text = (
+        "🌐 Globex Security 🌐\n"
+        "@User*, lieber Eigentümer des Servers **(servername)**,\n"
+        "aufgrund dessen, dass mein Besitzer regelmäßig einen neuen Free-Plan bei einer Hosting-Website beantragen muss, "
+        "wurde ich neu gestartet.\n"
+        "Dabei werden leider die Nutzer in der Whitelist und Blacklist gelöscht.\n"
+        "```Natürlich liegt es nicht nur am Free-Plan, sondern auch daran, dass mein Besitzer den Code anpasst, mich weiterentwickelt und verbessert.```\n"
+        "Bitte stelle daher deine Whitelist und Blacklist erneut ein.\n\n"
+        "*Mit freundlichen Grüßen,*\n"
+        "_Globex Security_"
+    )
 
-                if current_status == "PLAYING":
-                    online_start_times.setdefault(uid, time.time())
-                    game_name, game_link, _ = await roblox_get_game_info_from_presence(pres, session)
-                    embed = embed_playing(display, username, avatar, game_name, game_link)
-                    await log_channel.send(embed=embed)
-
-                elif current_status == "OFFLINE":
-                    # Offline-Embed nur senden, wenn vorher nicht offline
-                    if prev_status != "OFFLINE":
-                        start = online_start_times.pop(uid, None)
-                        played = int(time.time() - start) if start else 0
-                        played_fmt = format_played_time(played)
-                        embed = embed_offline(display, username, avatar, played_fmt)
-                        await log_channel.send(embed=embed)
-
-# -----------------------------
-# READY
-# -----------------------------
+    for guild in bot.guilds:
+        try:
+            owner = guild.owner or await bot.fetch_user(guild.owner_id)
+            if owner:
+                try:
+                    await owner.send(
+                        message_text.replace("@User", owner.mention)
+                                    .replace("(servername)", guild.name)
+                    )
+                    log(f"Neustart-Nachricht an {owner} per DM gesendet ({guild.name})")
+                except (Forbidden, HTTPException):
+                    channel = discord.utils.get(guild.text_channels, name="moderator-only")
+                    if channel:
+                        await channel.send(
+                            message_text.replace("@User", owner.mention)
+                                        .replace("(servername)", guild.name)
+                        )
+                        log(f"Neustart-Nachricht an #{channel.name} in {guild.name} gesendet")
+                    else:
+                        log(f"Kein 'moderator-only'-Kanal in {guild.name} gefunden.")
+        except Exception as e:
+            log(f"Fehler beim Benachrichtigen des Eigentümers in {guild.name}: {e}")
+# ---------- Events ----------
 @bot.event
 async def on_ready():
-    bot.add_view(PanicButtonView())
-    await bot.tree.sync()
-    if not presence_poll.is_running(): 
-        presence_poll.start()
-    print(f"Bot ist online als {bot.user}")
+    log(f"Bot online als {bot.user} (ID: {bot.user.id})")
+    await bot.change_presence(
+        status=discord.Status.online,
+        activity=discord.Game("Bereit zum Beschützen!")
+    )
 
-bot.run(TOKEN)
+    asyncio.create_task(notify_owner_after_restart())
+
+    try:
+        await bot.tree.sync()
+        log("Alle Slash Commands global synchronisiert ✅")
+    except Exception as e:
+        log(f"Fehler beim globalen Slash Command Sync: {e}")
+
+# ---------- Anti Ban/Kick Spamm ----------
+async def track_ban_kick(actor: discord.Member, action_type: str):
+    now = asyncio.get_event_loop().time()
+    dq = ban_kick_actions[actor.id]
+    dq.append(now)
+    while dq and (now - dq[0]) > ANTI_BAN_KICK_WINDOW_SECONDS:
+        dq.popleft()
+    if len(dq) >= ANTI_BAN_KICK_THRESHOLD:
+        guild = actor.guild
+        await kick_member(guild, actor, f"Anti Ban/Kick Spamm: {len(dq)} Aktionen in kurzer Zeit")
+        ban_kick_actions[actor.id].clear()
+
+@bot.event
+async def on_member_ban(guild: discord.Guild, user: discord.User):
+    actor = await actor_from_audit_log(guild, AuditLogAction.ban, target_id=user.id, within_seconds=30)
+    if isinstance(actor, discord.Member) and not is_whitelisted(actor):
+        await track_ban_kick(actor, "ban")
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    guild = member.guild
+    actor = await actor_from_audit_log(guild, AuditLogAction.kick, target_id=member.id, within_seconds=30)
+    if isinstance(actor, discord.Member) and not is_whitelisted(actor):
+        await track_ban_kick(actor, "kick")
+
+# ---------- Anti Webhook / Anti Invite / Anti Mention Spam ----------
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot or not message.guild:
+        return
+
+    # --- Anti Invite Spam ---
+    if INVITE_REGEX.search(message.content):
+        if not is_whitelisted(message.author):
+            await safe_delete_message(message)
+            now_ts = asyncio.get_event_loop().time()
+            dq = invite_timestamps[message.author.id]
+            dq.append(now_ts)
+            while dq and (now_ts - dq[0]) > INVITE_SPAM_WINDOW_SECONDS:
+                dq.popleft()
+            if len(dq) >= INVITE_SPAM_THRESHOLD:
+                await kick_member(message.guild, message.author, "Invite-Link-Spam (Kick nach 5 Links in 30s)")
+                invite_timestamps[message.author.id].clear()
+
+    # --- Anti Mention Spam ---
+    if not is_whitelisted(message.author):
+        if message.mention_everyone or any(role.mentionable for role in message.role_mentions):
+            now_ts = asyncio.get_event_loop().time()
+            dq = mention_timestamps[message.author.id]
+            msg_list = mention_messages[message.author.id]
+            dq.append(now_ts)
+            msg_list.append(message)
+
+            while dq and (now_ts - dq[0]) > MENTION_SPAM_WINDOW_SECONDS:
+                dq.popleft()
+                if msg_list:
+                    msg_list.popleft()
+
+            if len(dq) >= MENTION_SPAM_THRESHOLD:
+                await kick_member(
+                    message.guild,
+                    message.author,
+                    f"Massenping-Spam: {len(dq)} @everyone/@here/@Role Erwähnungen in kurzer Zeit"
+                )
+                for msg in list(msg_list):
+                    await safe_delete_message(msg)
+                mention_timestamps[message.author.id].clear()
+                mention_messages[message.author.id].clear()
+
+    await bot.process_commands(message)
+
+# ---------- Anti Webhook ----------
+@bot.event
+async def on_webhooks_update(channel: discord.abc.GuildChannel):
+    guild = channel.guild
+    actor = await actor_from_audit_log(guild, AuditLogAction.webhook_create, within_seconds=30)
+    try:
+        hooks = await channel.webhooks()
+    except (Forbidden, HTTPException):
+        hooks = []
+    for hook in hooks:
+        if hook.id in existing_webhooks[guild.id]:
+            continue
+        existing_webhooks[guild.id].add(hook.id)
+        member = guild.get_member(hook.user.id) if hook.user else None
+        if member and is_whitelisted(member):
+            continue
+        try:
+            await hook.delete(reason="Anti-Webhook aktiv")
+            log(f"Webhook {hook.name} gelöscht in #{channel.name}")
+        except (Forbidden, HTTPException, NotFound):
+            pass
+    if isinstance(actor, discord.Member) and not is_whitelisted(actor):
+        webhook_strikes[actor.id] += 1
+        if webhook_strikes[actor.id] >= WEBHOOK_STRIKES_BEFORE_KICK:
+            await kick_member(guild, actor, "Zu viele Webhook-Erstellungen (3)")
+            webhook_strikes[actor.id] = 0
+
+# ---------- Anti Bot Join ----------
+@bot.event
+async def on_member_join(member: discord.Member):
+    if member.bot:
+        inviter = None
+        try:
+            async for entry in member.guild.audit_logs(limit=10, action=AuditLogAction.bot_add):
+                if entry.target.id == member.id:
+                    inviter = entry.user
+                    break
+        except Exception:
+            pass
+        if inviter and not is_whitelisted(inviter):
+            await kick_member(member.guild, member, "Bot wurde von nicht-whitelisted User eingeladen")
+            await kick_member(member.guild, inviter, "Bot eingeladen ohne Whitelist-Berechtigung")
+
+# ---------- Anti Channel Delete ----------
+@bot.event
+async def on_guild_channel_delete(channel):
+    actor = await actor_from_audit_log(channel.guild, AuditLogAction.channel_delete, within_seconds=10)
+    if isinstance(actor, discord.Member) and not is_whitelisted(actor):
+        await kick_member(channel.guild, actor, "Kanal gelöscht ohne Berechtigung")
+
+# ---------- Anti Role Delete ----------
+@bot.event
+async def on_guild_role_delete(role):
+    actor = await actor_from_audit_log(role.guild, AuditLogAction.role_delete, within_seconds=10)
+    if isinstance(actor, discord.Member) and not is_whitelisted(actor):
+        await kick_member(role.guild, actor, "Rolle gelöscht ohne Berechtigung")
+
+# ---------- 🆕 Anti Channel Create ----------
+@bot.event
+async def on_guild_channel_create(channel):
+    actor = await actor_from_audit_log(channel.guild, AuditLogAction.channel_create, within_seconds=10)
+
+    if isinstance(actor, discord.Member) and not is_whitelisted(actor):
+        await kick_member(channel.guild, actor, "Kanal erstellt ohne Whitelist-Berechtigung")
+
+# ---------- Slash Commands ----------
+@bot.tree.command(name="addwhitelist", description="Fügt einen User zur Whitelist hinzu (Owner/Admin Only)")
+async def add_whitelist(interaction: discord.Interaction, user: discord.User):
+    if not is_bot_admin(interaction):
+        return await interaction.response.send_message("❌ Keine Berechtigung.", ephemeral=True)
+    whitelists[interaction.guild.id].add(user.id)
+    await interaction.response.send_message(f"✅ User {user} wurde in {interaction.guild.name} zur Whitelist hinzugefügt.", ephemeral=True)
+
+@bot.tree.command(name="removewhitelist", description="Entfernt einen User von der Whitelist (Owner/Admin Only)")
+async def remove_whitelist(interaction: discord.Interaction, user: discord.User):
+    if not is_bot_admin(interaction):
+        return await interaction.response.send_message("❌ Keine Berechtigung.", ephemeral=True)
+    whitelists[interaction.guild.id].discard(user.id)
+    await interaction.response.send_message(f"✅ User {user} wurde in {interaction.guild.name} von der Whitelist entfernt.", ephemeral=True)
+
+@bot.tree.command(name="showwhitelist", description="Zeigt alle User in der Whitelist")
+async def show_whitelist(interaction: discord.Interaction):
+    users = whitelists[interaction.guild.id]
+    if not users:
+        return await interaction.response.send_message("ℹ Whitelist ist leer.", ephemeral=True)
+    resolved = []
+    for uid in users:
+        try:
+            user = interaction.guild.get_member(uid) or await bot.fetch_user(uid)
+            resolved.append(user.name if user else str(uid))
+        except Exception:
+            resolved.append(str(uid))
+    await interaction.response.send_message("📜 Whitelist:\n" + "\n".join(resolved), ephemeral=True)
+
+@bot.tree.command(name="addblacklist", description="Fügt einen User zur Blacklist hinzu (Owner/Admin Only)")
+async def add_blacklist(interaction: discord.Interaction, user: discord.User):
+    if not is_bot_admin(interaction):
+        return await interaction.response.send_message("❌ Keine Berechtigung.", ephemeral=True)
+    blacklists[interaction.guild.id].add(user.id)
+    await interaction.response.send_message(f"✅ User {user} wurde in {interaction.guild.name} zur Blacklist hinzugefügt.", ephemeral=True)
+
+@bot.tree.command(name="removeblacklist", description="Entfernt einen User von der Blacklist (Owner/Admin Only)")
+async def remove_blacklist(interaction: discord.Interaction, user: discord.User):
+    if not is_bot_admin(interaction):
+        return await interaction.response.send_message("❌ Keine Berechtigung.", ephemeral=True)
+    blacklists[interaction.guild.id].discard(user.id)
+    await interaction.response.send_message(f"✅ User {user} wurde in {interaction.guild.name} von der Blacklist entfernt.", ephemeral=True)
+
+@bot.tree.command(name="showblacklist", description="Zeigt alle User in der Blacklist")
+async def show_blacklist(interaction: discord.Interaction):
+    users = blacklists[interaction.guild.id]
+    if not users:
+        return await interaction.response.send_message("ℹ Blacklist ist leer.", ephemeral=True)
+    resolved = []
+    for uid in users:
+        try:
+            user = interaction.guild.get_member(uid) or await bot.fetch_user(uid)
+            resolved.append(user.name if user else str(uid))
+        except Exception:
+            resolved.append(str(uid))
+    await interaction.response.send_message("🚫 Blacklist:\n" + "\n".join(resolved), ephemeral=True)
+
+# ---------- Neuer Slash Command: Create Webhook ----------
+@bot.tree.command(name="create-webhook", description="Erstellt einen Webhook (Whitelist Only)")
+async def create_webhook(interaction: discord.Interaction, channel: discord.TextChannel, name: str):
+    if not is_whitelisted(interaction.user):
+        return await interaction.response.send_message("❌ Du bist nicht whitelisted!", ephemeral=True)
+
+    try:
+        hook = await channel.create_webhook(name=name, reason=f"Erstellt von whitelisted User {interaction.user}")
+        existing_webhooks[interaction.guild.id].add(hook.id)
+
+        async def delete_later():
+            await asyncio.sleep(7 * 24 * 60 * 60)
+            try:
+                await hook.delete(reason="Webhook Ablauf nach 1 Woche")
+                existing_webhooks[interaction.guild.id].discard(hook.id)
+            except:
+                pass
+
+        asyncio.create_task(delete_later())
+
+        await interaction.response.send_message(f"✅ Webhook erstellt: {hook.url}", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Fehler beim Erstellen des Webhooks: {e}", ephemeral=True)
+
+# ---------- Start ----------
+if __name__ == "__main__":
+    if not TOKEN:
+        raise SystemExit("Fehlende Umgebungsvariable DISCORD_TOKEN.")
+    bot.run(TOKEN)
