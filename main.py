@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks
-import requests
+import aiohttp
 import json
 import time
 import os
@@ -47,30 +47,35 @@ def format_duration(sec: float) -> str:
 
 # ================== ROBLOX API ==================
 
-def get_roblox_user(uid: int):
-    r = requests.get(f"https://users.roblox.com/v1/users/{uid}")
-    return r.json() if r.status_code == 200 else None
+async def get_roblox_user(uid: int):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"https://users.roblox.com/v1/users/{uid}") as r:
+            if r.status != 200:
+                return None
+            return await r.json()
 
-def get_presence(uid: int):
-    r = requests.post(
-        "https://presence.roblox.com/v1/presence/users",
-        json={"userIds": [uid]}
-    )
-    if r.status_code != 200:
-        return None
-    return r.json()["userPresences"][0]
+async def get_presence(uid: int):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://presence.roblox.com/v1/presence/users",
+            json={"userIds": [uid]}
+        ) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            return data["userPresences"][0]
 
-def get_game_name(place_id: int) -> str:
+async def get_game_name(place_id: int) -> str:
     try:
-        universe = requests.get(
-            f"https://apis.roblox.com/universes/v1/places/{place_id}/universe"
-        ).json()["universeId"]
-
-        game = requests.get(
-            f"https://games.roblox.com/v1/games?universeIds={universe}"
-        ).json()["data"][0]["name"]
-
-        return game
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://apis.roblox.com/universes/v1/places/{place_id}/universe"
+            ) as r1:
+                universe_id = (await r1.json())["universeId"]
+            async with session.get(
+                f"https://games.roblox.com/v1/games?universeIds={universe_id}"
+            ) as r2:
+                return (await r2.json())["data"][0]["name"]
     except:
         return "Unknown Game"
 
@@ -124,7 +129,7 @@ async def add_user(interaction: discord.Interaction, roblox_id: int):
         )
         return
 
-    user = get_roblox_user(roblox_id)
+    user = await get_roblox_user(roblox_id)
     if not user:
         await interaction.response.send_message(
             "Roblox User nicht gefunden.",
@@ -211,7 +216,7 @@ async def monitor_users():
 
         for user in guild_data.get("users", {}).values():
 
-            presence = get_presence(user["roblox_id"])
+            presence = await get_presence(user["roblox_id"])
             if not presence:
                 continue
 
@@ -240,7 +245,7 @@ async def monitor_users():
 
             elif status == 2:
                 embed.color = discord.Color.green()
-                game = get_game_name(presence.get("placeId"))
+                game = await get_game_name(presence.get("placeId"))
                 embed.description = (
                     "**Is now playing!**\n"
                     f"**Location: {game}**"
@@ -262,6 +267,6 @@ async def on_ready():
     reset_data_on_startup()
     await tree.sync()
     monitor_users.start()
-    print("Bot gestartet – echte Roblox API – server-spezifisch")
+    print("Bot gestartet – echte Roblox API – aiohttp Version – server-spezifisch")
 
 client.run(TOKEN)
