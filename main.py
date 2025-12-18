@@ -61,24 +61,29 @@ async def get_presence(uid: int):
             data = await r.json()
             return data["userPresences"][0]
 
-async def get_game_name(place_id: int) -> str:
+async def get_game_name_webapi(place_id: int) -> str:
+    """
+    Liefert den Spielnamen anhand der Roblox-Web-API (api.roblox.com/places/{placeId})
+    """
+    if not place_id:
+        return "Unknown Game"
+
+    url = f"https://api.roblox.com/places/{place_id}"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"https://apis.roblox.com/universes/v1/places/{place_id}/universe"
-            ) as r1:
-                universe_id = (await r1.json())["universeId"]
-            async with session.get(
-                f"https://games.roblox.com/v1/games?universeIds={universe_id}"
-            ) as r2:
-                return (await r2.json())["data"][0]["name"]
-    except:
+            async with session.get(url) as r:
+                if r.status != 200:
+                    return "Unknown Game"
+                data = await r.json()
+                return data.get("name", "Unknown Game")
+    except Exception as e:
+        print(f"Fehler beim Abrufen des Game-Namens (Web-API): {e}")
         return "Unknown Game"
 
 # ================== SLASH COMMANDS ==================
 @tree.command(
     name="choose-bounty-channel",
-    description="Setzt den Channel für alle Bounty-Embeds (Channel auswählen oder ID)"
+    description="Setzt den Channel für alle Bounty-Embeds (Dropdown oder ID)"
 )
 @app_commands.check(admin_only)
 @app_commands.describe(channel_input="Wähle einen Textchannel oder gib die Channel-ID ein")
@@ -87,15 +92,12 @@ async def choose_bounty_channel(interaction: discord.Interaction, channel_input:
     data = load_data()
 
     channel = None
-
-    # 1️⃣ Prüfen, ob Discord Dropdown (Channel Mention) oder ID
     if channel_input.isdigit():
         channel = interaction.guild.get_channel(int(channel_input))
     elif channel_input.startswith("<#") and channel_input.endswith(">"):
         cid = int(channel_input[2:-1])
         channel = interaction.guild.get_channel(cid)
     else:
-        # Versuch, direkt Channel-Name zu matchen (optional)
         for c in interaction.guild.text_channels:
             if c.name == channel_input.strip("#"):
                 channel = c
@@ -103,7 +105,7 @@ async def choose_bounty_channel(interaction: discord.Interaction, channel_input:
 
     if not channel or not isinstance(channel, TextChannel):
         await interaction.response.send_message(
-            "Ungültiger Channel. Bitte eine gültige ID oder den Channel auswählen.",
+            "Ungültiger Channel. Bitte eine gültige ID oder Channel auswählen.",
             ephemeral=True
         )
         return
@@ -111,8 +113,8 @@ async def choose_bounty_channel(interaction: discord.Interaction, channel_input:
     data.setdefault(gid, {})
     data[gid]["channel_id"] = channel.id
     data[gid].setdefault("users", {})
-
     save_data(data)
+
     await interaction.response.send_message(
         f"Bounty-Channel gesetzt: {channel.mention}", ephemeral=True
     )
@@ -133,16 +135,14 @@ async def add_user(interaction: discord.Interaction, roblox_id: int):
     users = data[gid].setdefault("users", {})
     if str(roblox_id) in users:
         await interaction.response.send_message(
-            "User ist bereits in der Liste.",
-            ephemeral=True
+            "User ist bereits in der Liste.", ephemeral=True
         )
         return
 
     user = await get_roblox_user(roblox_id)
     if not user:
         await interaction.response.send_message(
-            "Roblox User nicht gefunden.",
-            ephemeral=True
+            "Roblox User nicht gefunden.", ephemeral=True
         )
         return
 
@@ -219,20 +219,21 @@ async def monitor_users():
 
             if status == 0:
                 embed.color = discord.Color.red()
+                embed.description = "**Is offline!**"
                 if user["last_online"]:
-                    embed.description = (
-                        "**Is now offline!**\n"
-                        f"**Played for: {format_duration(time.time() - user['last_online'])}**"
-                    )
+                    embed.description += f"\n**Played for: {format_duration(time.time() - user['last_online'])}**"
                     user["last_online"] = None
+
             elif status == 1:
                 embed.color = discord.Color.from_rgb(120, 180, 255)
                 embed.description = "**Is now online!**\n**Location: Robloxmenu**"
                 user["last_online"] = user["last_online"] or time.time()
+
             elif status == 2:
                 embed.color = discord.Color.green()
-                game = await get_game_name(presence.get("placeId"))
-                embed.description = f"**Is now playing!**\n**Location: {game}**"
+                place_id = presence.get("placeId")
+                game_name = await get_game_name_webapi(place_id)
+                embed.description = f"**Is now playing!**\n**Location: {game_name}**"
                 user["last_online"] = user["last_online"] or time.time()
 
             try:
@@ -249,6 +250,6 @@ async def on_ready():
     reset_data_on_startup()
     await tree.sync()
     monitor_users.start()
-    print("Bot gestartet – echte Roblox API – aiohttp Version – Dropdown/ID Channel")
+    print("Bot gestartet – Roblox Web-API für Game-Namen – Dropdown/ID Channel")
 
 client.run(TOKEN)
