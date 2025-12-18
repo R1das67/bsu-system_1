@@ -83,31 +83,20 @@ async def get_game_name(place_id: int) -> str:
 
 @tree.command(
     name="choose-bounty-channel",
-    description="Setzt den Channel für alle Bounty-Embeds"
+    description="Setzt den Channel für alle Bounty-Embeds (nur Channel-ID)"
 )
 @app_commands.check(admin_only)
-@app_commands.describe(channel_input="Channel auswählen oder ID eingeben")
-async def choose_bounty_channel(interaction: discord.Interaction, channel_input: str):
+@app_commands.describe(channel_id="ID des Textchannels")
+async def choose_bounty_channel(interaction: discord.Interaction, channel_id: int):
 
     gid = str(interaction.guild.id)
     data = load_data()
 
-    # Prüfen, ob es eine ID ist
-    channel = None
-    if channel_input.isdigit():
-        channel = interaction.guild.get_channel(int(channel_input))
-    # Prüfen, ob es ein Channel-Mention (#channel) ist
-    elif channel_input.startswith("<#") and channel_input.endswith(">"):
-        cid = int(channel_input[2:-1])
-        channel = interaction.guild.get_channel(cid)
-
-    # Optional: Discord erlaubt auch direkte Channel-Auswahl
-    if isinstance(channel_input, TextChannel):
-        channel = channel_input
-
+    channel = interaction.guild.get_channel(channel_id)
     if not channel or not isinstance(channel, TextChannel):
         await interaction.response.send_message(
-            "Ungültiger Channel. Bitte ID oder Channel auswählen.", ephemeral=True
+            "Ungültiger Channel. Bitte nur die ID eines Textchannels eingeben.",
+            ephemeral=True
         )
         return
 
@@ -273,6 +262,6 @@ async def on_ready():
     reset_data_on_startup()
     await tree.sync()
     monitor_users.start()
-    print("Bot gestartet – echte Roblox API – aiohttp Version – server-spezifisch")
+    print("Bot gestartet – echte Roblox API – aiohttp Version – nur Channel-ID")
 
 client.run(TOKEN)
