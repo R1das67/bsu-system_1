@@ -6,10 +6,11 @@ import os
 import time
 
 CONFIG_FILE = "config.json"
+APPLICATION_BAN_FILE = "application_bans.json"
 COOLDOWN_SECONDS = 60
 
 # -------------------------------------------------
-# CONFIG HANDLING (SAFE)
+# CONFIG HANDLING
 # -------------------------------------------------
 def load_config():
     if not os.path.exists(CONFIG_FILE):
@@ -28,12 +29,26 @@ def save_config(data):
     with open(CONFIG_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
+def load_application_bans():
+    if not os.path.exists(APPLICATION_BAN_FILE):
+        with open(APPLICATION_BAN_FILE, "w") as f:
+            json.dump({}, f)
+        return {}
+
+    with open(APPLICATION_BAN_FILE, "r") as f:
+        return json.load(f)
+
+def save_application_bans(data):
+    with open(APPLICATION_BAN_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
 # -------------------------------------------------
 # BOT SETUP
 # -------------------------------------------------
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
+intents.members = True
 
+bot = commands.Bot(command_prefix="!", intents=intents)
 user_cooldowns = {}
 
 # -------------------------------------------------
@@ -41,20 +56,14 @@ user_cooldowns = {}
 # -------------------------------------------------
 def admin_only(interaction: discord.Interaction) -> bool:
     perms = interaction.user.guild_permissions
-    return perms.administrator or perms.manage_guild
+    return perms.administrator or perms.manage_roles
 
 # -------------------------------------------------
-# MODAL
+# PANIC MODAL
 # -------------------------------------------------
 class PanicModal(discord.ui.Modal, title="🚨 Panic Alarm"):
-    roblox_user = discord.ui.TextInput(
-        label="Your Roblox Username",
-        required=True
-    )
-    location = discord.ui.TextInput(
-        label="Your Location",
-        required=True
-    )
+    roblox_user = discord.ui.TextInput(label="Your Roblox Username", required=True)
+    location = discord.ui.TextInput(label="Your Location", required=True)
     extra_info = discord.ui.TextInput(
         label="Additional Information (Optional)",
         style=discord.TextStyle.paragraph,
@@ -85,25 +94,10 @@ class PanicModal(discord.ui.Modal, title="🚨 Panic Alarm"):
             )
             return
 
-        embed = discord.Embed(
-            title="🚨 Panic Alarm! 🚨",
-            color=discord.Color.red()
-        )
-        embed.add_field(
-            name="User",
-            value=interaction.user.mention,
-            inline=False
-        )
-        embed.add_field(
-            name="Roblox Username",
-            value=self.roblox_user.value,
-            inline=False
-        )
-        embed.add_field(
-            name="Location",
-            value=self.location.value,
-            inline=False
-        )
+        embed = discord.Embed(title="🚨 Panic Alarm! 🚨", color=discord.Color.red())
+        embed.add_field(name="User", value=interaction.user.mention, inline=False)
+        embed.add_field(name="Roblox Username", value=self.roblox_user.value, inline=False)
+        embed.add_field(name="Location", value=self.location.value, inline=False)
         embed.add_field(
             name="Additional Information",
             value=self.extra_info.value or "None",
@@ -119,7 +113,7 @@ class PanicModal(discord.ui.Modal, title="🚨 Panic Alarm"):
         )
 
 # -------------------------------------------------
-# BUTTON VIEW (PERSISTENT)
+# PANIC VIEW
 # -------------------------------------------------
 class PanicView(discord.ui.View):
     def __init__(self):
@@ -134,7 +128,7 @@ class PanicView(discord.ui.View):
         await interaction.response.send_modal(PanicModal())
 
 # -------------------------------------------------
-# SLASH COMMANDS (ADMIN ONLY)
+# PANIC COMMANDS
 # -------------------------------------------------
 @bot.tree.command(name="pick-panic-channel")
 async def pick_panic_channel(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -174,10 +168,7 @@ async def create_panic_button(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title="🚨 Panic Button 🚨",
-        description=(
-            "**Need immediate help on an EH server?**\n\n"
-            "Press the button below to alert our team instantly."
-        ),
+        description="Press the button below to alert our team instantly.",
         color=discord.Color.red()
     )
 
@@ -185,8 +176,88 @@ async def create_panic_button(interaction: discord.Interaction):
     await interaction.response.send_message("Panic button created.", ephemeral=True)
 
 # -------------------------------------------------
+# APPLICATION BAN COMMANDS
+# -------------------------------------------------
+@bot.tree.command(name="add-application-ban")
+async def add_application_ban(
+    interaction: discord.Interaction,
+    user_id: str,
+    role: discord.Role
+):
+    if not admin_only(interaction):
+        await interaction.response.send_message("No permission.", ephemeral=True)
+        return
+
+    bans = load_application_bans()
+    bans[str(user_id)] = role.id
+    save_application_bans(bans)
+
+    member = interaction.guild.get_member(int(user_id))
+    if member:
+        await member.add_roles(role)
+
+    await interaction.response.send_message(
+        f"User `{user_id}` received application ban role `{role.name}`.",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="remove-application-ban")
+async def remove_application_ban(interaction: discord.Interaction, user_id: str):
+    if not admin_only(interaction):
+        await interaction.response.send_message("No permission.", ephemeral=True)
+        return
+
+    bans = load_application_bans()
+    role_id = bans.pop(str(user_id), None)
+    save_application_bans(bans)
+
+    member = interaction.guild.get_member(int(user_id))
+    if member and role_id:
+        role = interaction.guild.get_role(role_id)
+        if role:
+            await member.remove_roles(role)
+
+    await interaction.response.send_message(
+        f"Application ban removed for `{user_id}`.",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="show-application-ban-list")
+async def show_application_ban_list(interaction: discord.Interaction):
+    if not admin_only(interaction):
+        await interaction.response.send_message("No permission.", ephemeral=True)
+        return
+
+    bans = load_application_bans()
+    if not bans:
+        await interaction.response.send_message(
+            "No application banned users.",
+            ephemeral=True
+        )
+        return
+
+    lines = []
+    for uid, role_id in bans.items():
+        member = interaction.guild.get_member(int(uid))
+        role = interaction.guild.get_role(role_id)
+        name = member.display_name if member else "Unknown User"
+        role_name = role.name if role else "Unknown Role"
+        lines.append(f"{name} — `{uid}` — {role_name}")
+
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+# -------------------------------------------------
 # EVENTS
 # -------------------------------------------------
+@bot.event
+async def on_member_join(member: discord.Member):
+    bans = load_application_bans()
+    role_id = bans.get(str(member.id))
+    if role_id:
+        role = member.guild.get_role(role_id)
+        if role:
+            await member.add_roles(role)
+
 @bot.event
 async def on_ready():
     load_config()
