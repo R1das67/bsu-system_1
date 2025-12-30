@@ -198,11 +198,12 @@ async def send_embed(
         color=embed_color
     )
 
+    if image_url_top:
+        embed.set_image(url=image_url_top)  # Bild oben über Titel
     if thumbnail_url:
         embed.set_thumbnail(url=thumbnail_url)
-    if image_url_top:
-        embed.set_image(url=image_url_top)
     if image_url_bottom:
+        # Setzt Footer-Icon, Footer-Text leer, also unten unter dem Text
         embed.set_footer(text="", icon_url=image_url_bottom)
 
     await channel.send(embed=embed)
