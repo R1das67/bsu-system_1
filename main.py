@@ -121,7 +121,7 @@ class PanicModal(discord.ui.Modal, title="🚨 Panic Alarm"):
         )
 
 # -------------------------------------------------
-# PANIC VIEW
+# PANIC VIEW (PERSISTENT)
 # -------------------------------------------------
 class PanicView(discord.ui.View):
     def __init__(self):
@@ -180,7 +180,7 @@ class TryoutModal(discord.ui.Modal, title="Tryout Application"):
         )
 
 # -------------------------------------------------
-# TRYOUT VIEW
+# TRYOUT VIEW (NON-PERSISTENT)
 # -------------------------------------------------
 class TryoutView(discord.ui.View):
     def __init__(self):
@@ -241,7 +241,7 @@ async def create_panic_button(interaction: discord.Interaction):
     await interaction.response.send_message("Panic button created.", ephemeral=True)
 
 # -------------------------------------------------
-# EMBED COMMAND (ADMIN ONLY)
+# EMBED COMMAND
 # -------------------------------------------------
 @bot.tree.command(name="send-embed", description="Send an embed message to a channel")
 @app_commands.default_permissions(administrator=True)
@@ -260,11 +260,7 @@ async def send_embed(
     except ValueError:
         embed_color = discord.Color.red().value
 
-    embed = discord.Embed(
-        title=title,
-        description=description,
-        color=embed_color
-    )
+    embed = discord.Embed(title=title, description=description, color=embed_color)
 
     if thumbnail_url:
         embed.set_thumbnail(url=thumbnail_url)
@@ -280,14 +276,10 @@ async def send_embed(
     )
 
 # -------------------------------------------------
-# APPLICATION BAN COMMANDS (ADMIN)
+# APPLICATION BAN COMMANDS
 # -------------------------------------------------
 @bot.tree.command(name="add-application-ban")
-async def add_application_ban(
-    interaction: discord.Interaction,
-    user_id: str,
-    role: discord.Role
-):
+async def add_application_ban(interaction: discord.Interaction, user_id: str, role: discord.Role):
     if not admin_only(interaction):
         await interaction.response.send_message("No permission.", ephemeral=True)
         return
@@ -334,19 +326,14 @@ async def show_application_ban_list(interaction: discord.Interaction):
 
     bans = load_application_bans()
     if not bans:
-        await interaction.response.send_message(
-            "No application banned users.",
-            ephemeral=True
-        )
+        await interaction.response.send_message("No application banned users.", ephemeral=True)
         return
 
     lines = []
     for uid, role_id in bans.items():
         member = interaction.guild.get_member(int(uid))
         role = interaction.guild.get_role(role_id)
-        name = member.display_name if member else "Unknown User"
-        role_name = role.name if role else "Unknown Role"
-        lines.append(f"{name} — `{uid}` — {role_name}")
+        lines.append(f"{member.display_name if member else 'Unknown'} — `{uid}` — {role.name if role else 'Unknown'}")
 
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
@@ -366,7 +353,6 @@ async def on_member_join(member: discord.Member):
 async def on_ready():
     load_config()
     bot.add_view(PanicView())
-    bot.add_view(TryoutView())
     await bot.tree.sync()
     print(f"Logged in als {bot.user}")
 
