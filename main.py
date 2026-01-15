@@ -10,6 +10,8 @@ APPLICATION_BAN_FILE = "application_bans.json"
 COOLDOWN_SECONDS = 60
 
 OWNER_ID = 843180408152784936
+TRYOUT_CHANNEL_ID = 1454562326597468221
+MAX_TRYOUTS = 15
 
 # -------------------------------------------------
 # CONFIG HANDLING
@@ -134,6 +136,72 @@ class PanicView(discord.ui.View):
         await interaction.response.send_modal(PanicModal())
 
 # -------------------------------------------------
+# TRYOUT MODAL
+# -------------------------------------------------
+class TryoutModal(discord.ui.Modal, title="Tryout Application"):
+    roblox = discord.ui.TextInput(label="Your Roblox Username", required=True)
+    age = discord.ui.TextInput(label="Your age", required=True)
+
+    def __init__(self, view):
+        super().__init__()
+        self.view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if self.view.count >= MAX_TRYOUTS:
+            await interaction.response.send_message(
+                "Tryout is already full.",
+                ephemeral=True
+            )
+            return
+
+        self.view.count += 1
+
+        channel = interaction.guild.get_channel(TRYOUT_CHANNEL_ID)
+
+        embed = discord.Embed(
+            title="New Tryout Application",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="User", value=interaction.user.mention, inline=False)
+        embed.add_field(name="Roblox Username", value=self.roblox.value, inline=False)
+        embed.add_field(name="Age", value=self.age.value, inline=False)
+        embed.set_footer(text=f"{self.view.count}/{MAX_TRYOUTS} participants")
+
+        await channel.send(embed=embed)
+
+        if self.view.count >= MAX_TRYOUTS:
+            for item in self.view.children:
+                item.disabled = True
+            await interaction.message.edit(view=self.view)
+
+        await interaction.response.send_message(
+            "Your tryout application has been submitted.",
+            ephemeral=True
+        )
+
+# -------------------------------------------------
+# TRYOUT VIEW
+# -------------------------------------------------
+class TryoutView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.count = 0
+
+    @discord.ui.button(
+        label="Tryout",
+        style=discord.ButtonStyle.primary
+    )
+    async def tryout_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.count >= MAX_TRYOUTS:
+            await interaction.response.send_message(
+                "Tryout is already full.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(TryoutModal(self))
+
+# -------------------------------------------------
 # PANIC COMMANDS (OWNER ONLY)
 # -------------------------------------------------
 @bot.tree.command(name="pick-panic-channel")
@@ -184,7 +252,8 @@ async def send_embed(
     description: str,
     color: str = "red",
     thumbnail_url: str | None = None,
-    image_url: str | None = None
+    image_url: str | None = None,
+    tryout: bool = False
 ):
     try:
         embed_color = int(color.replace("#", ""), 16)
@@ -200,9 +269,11 @@ async def send_embed(
     if thumbnail_url:
         embed.set_thumbnail(url=thumbnail_url)
     if image_url:
-        embed.set_image(url=image_url)  # Direkt unter Beschreibung
+        embed.set_image(url=image_url)
 
-    await channel.send(embed=embed)
+    view = TryoutView() if tryout else None
+
+    await channel.send(embed=embed, view=view)
     await interaction.response.send_message(
         f"Embed sent to {channel.mention}",
         ephemeral=True
@@ -295,6 +366,7 @@ async def on_member_join(member: discord.Member):
 async def on_ready():
     load_config()
     bot.add_view(PanicView())
+    bot.add_view(TryoutView())
     await bot.tree.sync()
     print(f"Logged in als {bot.user}")
 
