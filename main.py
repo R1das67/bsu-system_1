@@ -5,7 +5,7 @@ import json
 import os
 import time
 import datetime
-import pytz
+from zoneinfo import ZoneInfo
 
 CONFIG_FILE = "config.json"
 APPLICATION_BAN_FILE = "application_bans.json"
@@ -19,7 +19,7 @@ MAX_TRYOUTS = 15
 # ACTIVITY CHECK CONFIG (NEU)
 # -------------------------------------------------
 ACTIVITY_CHANNEL_ID = 1454562234196955139
-BERLIN_TZ = pytz.timezone("Europe/Berlin")
+BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
 last_activity_message_id = None
 first_reactor_id = None
@@ -389,3 +389,4 @@ async def on_ready():
 # START
 # -------------------------------------------------
 bot.run(os.getenv("DISCORD_TOKEN"))
+
