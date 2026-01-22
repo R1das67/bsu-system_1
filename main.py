@@ -149,6 +149,56 @@ class PanicView(discord.ui.View):
         await interaction.response.send_modal(PanicModal())
 
 # -------------------------------------------------
+# PANIC COMMANDS (OWNER ONLY) – WIEDERHINZUGEFÜGT
+# -------------------------------------------------
+@bot.tree.command(name="pick-panic-channel")
+@app_commands.check(owner_only)
+async def pick_panic_channel(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+):
+    config = load_config()
+    config["panic_channel_id"] = channel.id
+    save_config(config)
+
+    await interaction.response.send_message(
+        f"Panic channel set to {channel.mention}",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="pick-panic-role")
+@app_commands.check(owner_only)
+async def pick_panic_role(
+    interaction: discord.Interaction,
+    role: discord.Role
+):
+    config = load_config()
+    config["panic_role_id"] = role.id
+    save_config(config)
+
+    await interaction.response.send_message(
+        f"Panic role set to {role.mention}",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="create-panic-button")
+@app_commands.check(owner_only)
+async def create_panic_button(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🚨 Panic Button 🚨",
+        description="Press the button below to alert our team instantly.",
+        color=discord.Color.red()
+    )
+
+    await interaction.channel.send(embed=embed, view=PanicView())
+    await interaction.response.send_message(
+        "Panic button created.",
+        ephemeral=True
+    )
+
+# -------------------------------------------------
 # TRYOUT MODAL
 # -------------------------------------------------
 class TryoutModal(discord.ui.Modal, title="Tryout Application"):
@@ -389,4 +439,3 @@ async def on_ready():
 # START
 # -------------------------------------------------
 bot.run(os.getenv("DISCORD_TOKEN"))
-
