@@ -1,9 +1,11 @@
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 import json
 import os
 import time
+import datetime
+import pytz
 
 CONFIG_FILE = "config.json"
 APPLICATION_BAN_FILE = "application_bans.json"
@@ -12,6 +14,15 @@ COOLDOWN_SECONDS = 60
 OWNER_ID = 843180408152784936
 TRYOUT_CHANNEL_ID = 1454562326597468221
 MAX_TRYOUTS = 15
+
+# -------------------------------------------------
+# ACTIVITY CHECK CONFIG (NEU)
+# -------------------------------------------------
+ACTIVITY_CHANNEL_ID = 1454562234196955139
+BERLIN_TZ = pytz.timezone("Europe/Berlin")
+
+last_activity_message_id = None
+first_reactor_id = None
 
 # -------------------------------------------------
 # CONFIG HANDLING
@@ -52,6 +63,8 @@ def save_application_bans(data):
 intents = discord.Intents.default()
 intents.members = True
 intents.guilds = True
+intents.reactions = True
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 user_cooldowns = {}
@@ -180,7 +193,7 @@ class TryoutModal(discord.ui.Modal, title="Tryout Application"):
         )
 
 # -------------------------------------------------
-# TRYOUT VIEW (NON-PERSISTENT)
+# TRYOUT VIEW
 # -------------------------------------------------
 class TryoutView(discord.ui.View):
     def __init__(self):
@@ -200,45 +213,6 @@ class TryoutView(discord.ui.View):
             return
 
         await interaction.response.send_modal(TryoutModal(self))
-
-# -------------------------------------------------
-# PANIC COMMANDS (OWNER ONLY)
-# -------------------------------------------------
-@bot.tree.command(name="pick-panic-channel")
-@app_commands.check(owner_only)
-async def pick_panic_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    config = load_config()
-    config["panic_channel_id"] = channel.id
-    save_config(config)
-
-    await interaction.response.send_message(
-        f"Panic channel set to {channel.mention}",
-        ephemeral=True
-    )
-
-@bot.tree.command(name="pick-panic-role")
-@app_commands.check(owner_only)
-async def pick_panic_role(interaction: discord.Interaction, role: discord.Role):
-    config = load_config()
-    config["panic_role_id"] = role.id
-    save_config(config)
-
-    await interaction.response.send_message(
-        f"Panic role set to {role.mention}",
-        ephemeral=True
-    )
-
-@bot.tree.command(name="create-panic-button")
-@app_commands.check(owner_only)
-async def create_panic_button(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🚨 Panic Button 🚨",
-        description="Press the button below to alert our team instantly.",
-        color=discord.Color.red()
-    )
-
-    await interaction.channel.send(embed=embed, view=PanicView())
-    await interaction.response.send_message("Panic button created.", ephemeral=True)
 
 # -------------------------------------------------
 # EMBED COMMAND
@@ -333,9 +307,47 @@ async def show_application_ban_list(interaction: discord.Interaction):
     for uid, role_id in bans.items():
         member = interaction.guild.get_member(int(uid))
         role = interaction.guild.get_role(role_id)
-        lines.append(f"{member.display_name if member else 'Unknown'} — `{uid}` — {role.name if role else 'Unknown'}")
+        lines.append(
+            f"{member.display_name if member else 'Unknown'} — `{uid}` — {role.name if role else 'Unknown'}"
+        )
 
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+# -------------------------------------------------
+# ACTIVITY CHECK TASK (NEU)
+# -------------------------------------------------
+@tasks.loop(minutes=1)
+async def activity_check_task():
+    global last_activity_message_id, first_reactor_id
+
+    now = datetime.datetime.now(BERLIN_TZ)
+    if now.hour != 16 or now.minute != 0:
+        return
+
+    channel = bot.get_channel(ACTIVITY_CHANNEL_ID)
+    if not channel:
+        return
+
+    first_reactor_id = None
+
+    await channel.send("@everyone")
+
+    embed = discord.Embed(
+        title="📢BSU | Activity-Check",
+        description=(
+            "Alle Mitglieder müssen mit ✅ reagieren.\n"
+            "Damit bestätigt ihr, dass ihr aktiv seid und in der Einheit bleibt.\n\n"
+            "**Wichtig:**\n\n"
+            "❗Wer nicht reagiert → Downrank\n"
+            "❗Wer danach weiterhin inaktiv bleibt → weitere Konsequenzen möglich\n\n"
+            "Danke für euren Beitrag!🔷"
+        ),
+        color=discord.Color.blue()
+    )
+
+    msg = await channel.send(embed=embed)
+    last_activity_message_id = msg.id
+    await msg.add_reaction("✅")
 
 # -------------------------------------------------
 # EVENTS
@@ -350,10 +362,27 @@ async def on_member_join(member: discord.Member):
             await member.add_roles(role)
 
 @bot.event
+async def on_reaction_add(reaction: discord.Reaction, user: discord.User):
+    global first_reactor_id
+
+    if user.bot:
+        return
+    if reaction.message.id != last_activity_message_id:
+        return
+    if str(reaction.emoji) != "✅":
+        return
+    if first_reactor_id is not None:
+        return
+
+    first_reactor_id = user.id
+    await reaction.message.channel.send(f"{user.mention} wurde erster🥇")
+
+@bot.event
 async def on_ready():
     load_config()
     bot.add_view(PanicView())
     await bot.tree.sync()
+    activity_check_task.start()
     print(f"Logged in als {bot.user}")
 
 # -------------------------------------------------
